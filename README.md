@@ -50,7 +50,7 @@ en numero.
 Global, para poder ejecutarlo desde cualquier directorio:
 
 ```bash
-uv tool install -e /Users/alfredo.pineda/Herd/sites/orquestador_agentes
+uv tool install -e .
 orq --version
 ```
 
@@ -102,7 +102,7 @@ orq detect             # stack del proyecto + catalogo de modelos
 orq models             # solo modelos, tiers y seleccion automatica
 orq agents             # que agentes hay y a quien puede llamar cada uno
 orq agents --show local   # imprime el prompt completo de un agente
-orq check              # valida lo generado
+orq check              # valida lo generado (falla si un modelo no existe o no soporta tools)
 orq compare            # estimacion de coste frente a hacerlo todo con el modelo caro
 orq generate --dry-run # imprime el contenido de los agentes sin escribir
 ```
@@ -146,13 +146,25 @@ sobrescribe a ciegas, porque ahí viven tus providers, MCP y credenciales:
 - Si tiene comentarios JSONC, **no se toca** y te dice qué línea añadir a mano,
   porque reserializarlo los destruiría.
 
+### Permisos de los agentes
+
+Los cuatro agentes generados comparten una politica minima, ademas de la que ya
+describe la tabla de arriba:
+
+- `external_directory` denegado: no leen ni escriben fuera del proyecto.
+- Los ficheros sensibles detectados (`.env`, claves, certificados) se deniegan para
+  `read` y `edit` en todos, incluido el agente `barato` (que va a la nube).
+- El agente `local` deniega los comandos de red (`curl`, `wget`, `nc`, `ssh`, `scp`,
+  `git push`). Es un guardarrail contra fugas accidentales, no un sandbox.
+- El orquestador no lee secretos: su contexto se resume al plan.
+
 ## Estrategia: `.orquestador.yaml`
 
 Se genera automaticamente y es la fuente de verdad para re-generar. Editalo a tu gusto:
 
 ```yaml
 orchestrator_model: openai/gpt-6-astra
-orchestrator_variant: high
+orchestrator_variant: auto
 default_agent: true
 scope: project
 subagents:
@@ -170,6 +182,14 @@ rules:
 ```
 
 Despues: `orq generate` (sin `--force` no pisa ficheros existentes; con `--force` los rehace).
+
+`scope` se guarda en la estrategia, asi que `orq generate` reutiliza donde se escribio
+la ultima vez; `--scope` solo hace falta para cambiarlo.
+
+`orchestrator_variant: auto` usa `high` **solo si el modelo lo declara** en el catalogo
+de OpenCode (`~/.cache/opencode/models.json`). Una variante que el modelo no soporta es
+un error de resolucion en OpenCode, asi que nunca se inventa: si no hay dato, no se pone.
+Puedes forzar una concreta (`high`, `low`...) o desactivarla con `none`.
 
 ## Anadir un modelo local
 

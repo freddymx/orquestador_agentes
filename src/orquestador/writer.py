@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .catalog import GLOBAL_CONFIG_DIR, strip_jsonc
+from .catalog import GLOBAL_CONFIG_DIR, meta_for, strip_jsonc, tool_support
 from .planner import OrchestrationPlan, Strategy, save_strategy
 from .templates import default_agent_snippet, provider_snippet, render_agent
 
@@ -32,11 +32,11 @@ def config_file(scope: str, project_dir: Path) -> Path:
     return project_dir / "opencode.jsonc"
 
 
-def patch_default_agent(path: Path, agent_name: str) -> bool:
+def patch_default_agent(path: Path, agent_name: str) -> bool | None:
     """Anade default_agent a una config existente SIN perder providers/mcp.
 
-    Devuelve False (y no escribe) si el fichero tiene comentarios JSONC, porque
-    reserializarlo los destruiria. En ese caso es mejor que lo haga una persona.
+    Devuelve True si escribe, None si ya estaba configurado y False si no se puede
+    tocar (comentarios JSONC o JSON invalido): reserializarlo destruiria el original.
     """
     import json
 
@@ -50,7 +50,7 @@ def patch_default_agent(path: Path, agent_name: str) -> bool:
     if not isinstance(data, dict):
         return False
     if data.get("default_agent") == agent_name:
-        return False
+        return None
     data["default_agent"] = agent_name
     ordered = {"$schema": data.pop("$schema")} if "$schema" in data else {}
     ordered.update(data)
@@ -68,6 +68,9 @@ def write_plan(
 ) -> WriteResult:
     target_dir = agents_dir(scope, project_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
+    # La estrategia guardada debe decir donde se escribio de verdad: si no, el
+    # siguiente `orq generate` sin --scope escribe en el sitio equivocado.
+    plan.strategy.scope = scope
 
     written: list[Path] = []
     skipped: list[Path] = []
@@ -91,14 +94,16 @@ def write_plan(
         elif not cfg.exists():
             cfg.write_text(default_agent_snippet(primary.name), encoding="utf-8")
             written.append(cfg)
-        elif patch_default_agent(cfg, primary.name):
-            written.append(cfg)
-            notes.append(f"{cfg.name}: anadido \"default_agent\": \"{primary.name}\" conservando el resto.")
         else:
-            notes.append(
-                f"{cfg.name} ya existe y tiene comentarios: no se toca para no perderlos.\n"
-                f"  Anade a mano   \"default_agent\": \"{primary.name}\""
-            )
+            patched = patch_default_agent(cfg, primary.name)
+            if patched:
+                written.append(cfg)
+                notes.append(f"{cfg.name}: anadido \"default_agent\": \"{primary.name}\" conservando el resto.")
+            elif patched is False:
+                notes.append(
+                    f"{cfg.name} ya existe y tiene comentarios: no se toca para no perderlos.\n"
+                    f"  Anade a mano   \"default_agent\": \"{primary.name}\""
+                )
 
     for patch in plan.provider_patches:
         notes.append(
@@ -190,18 +195,41 @@ def validate(
             problems.append(("error", f"{path.name}: falta 'mode'"))
         if not body.strip():
             problems.append(("warn", f"{path.name}: cuerpo vacio (el agente no tiene prompt de sistema)"))
+        raw_ref = _raw_ref(front.get("model"))
         ref = _clean_ref(front.get("model"))
+        variant = raw_ref.split("#", 1)[1].strip() if raw_ref and "#" in raw_ref else None
         if not ref:
             problems.append(("warn", f"{path.name}: sin 'model' -> heredara el del padre (caro)"))
-        elif catalog is not None and catalog.find(ref) is None:
-            problems.append(("warn", f"{path.name}: modelo '{ref}' no aparece en el catalogo"))
+        elif catalog is not None and catalog.models:
+            model = catalog.find(ref)
+            if model is None:
+                problems.append(
+                    ("error", f"{path.name}: modelo '{ref}' no existe en la configuracion de OpenCode")
+                )
+            elif tool_support(model) is False:
+                level = "error" if name == "orquestador" else "warn"
+                problems.append(
+                    (level, f"{path.name}: '{ref}' no soporta tool calling; no podra usar herramientas")
+                )
+        if variant:
+            meta = meta_for(ref) if ref else None
+            if meta is not None and meta.variants_known and variant not in meta.variants:
+                disponibles = ", ".join(meta.variants) or "ninguna"
+                problems.append(
+                    ("error", f"{path.name}: variante '{variant}' no existe para '{ref}' "
+                              f"(disponibles: {disponibles})")
+                )
 
     orch = fronts.get("orquestador")
     if orch is not None:
         effective = effective_permissions(orch)
-        for action in ("edit", "write", "shell"):
+        for action in ("edit", "shell"):
             if effective.get((action, "*")) != "deny":
                 problems.append(("error", f"orquestador.md: no deniega '{action}'; deberia coordinar solo"))
+        if effective.get(("external_directory", "*")) != "deny":
+            problems.append(
+                ("warn", "orquestador.md: no deniega external_directory; puede leer fuera del proyecto")
+            )
         if effective.get(("subagent", "*")) != "deny":
             problems.append(("error", "orquestador.md: no deniega subagent '*'; podria anidar en exceso"))
         allowed = {
@@ -220,6 +248,10 @@ def validate(
         effective = effective_permissions(front)
         if effective.get(("subagent", "*")) == "allow":
             problems.append(("warn", f"{name}.md: permite subagent '*'; conviene cerrar la lista"))
+        if effective.get(("external_directory", "*")) != "deny":
+            problems.append(
+                ("warn", f"{name}.md: no deniega external_directory; puede salir del proyecto")
+            )
 
     cfg = config_file(scope, project_dir)
     if cfg.exists() and "default_agent" not in cfg.read_text(encoding="utf-8"):
@@ -234,6 +266,14 @@ def validate(
             )
 
     return problems
+
+
+def _raw_ref(value) -> str | None:
+    """Modelo tal cual viene del frontmatter, conservando '#variante'."""
+    if value is None:
+        return None
+    text = str(value).strip().strip('"').strip()
+    return text or None
 
 
 def _clean_ref(value) -> str | None:

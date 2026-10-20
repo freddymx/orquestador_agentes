@@ -175,7 +175,7 @@ def test_build_plan_generates_four_agents(tmp_path):
     }, [], probe=False)
     plan = build_plan(profile, catalog)
     assert [a.name for a in plan.agents] == ["orquestador", "local", "barato", "especialista"]
-    assert plan.orchestrator.model == "openai/gpt-6-astra#high"
+    assert plan.orchestrator.model == "openai/gpt-6-astra"  # sin cache: no se inventa variante
     local = next(a for a in plan.subagents if a.name == "local")
     assert local.model == "llamacpp/qwen3.6-35b"
     assert set(plan.delegation_targets) == {"local", "barato", "especialista"}

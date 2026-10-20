@@ -1,14 +1,17 @@
 """Descubrimiento de modelos disponibles para OpenCode.
 
-Combina tres fuentes:
+Combina cuatro fuentes:
   1. La configuracion de OpenCode (~/.config/opencode/opencode.json[c] y por proyecto).
   2. Sondeo HTTP de los endpoints OpenAI-compatible declarados (llama.cpp, Lemonade, Ollama...).
-  3. Un catalogo embebido con precios y capacidades conocidas (para clasificar tiers).
+  3. El catalogo de models.dev que OpenCode cachea en ~/.cache/opencode/models.json
+     (tool calling, ventana de contexto y variantes reales de cada modelo).
+  4. Un catalogo embebido con precios y capacidades conocidas (para clasificar tiers).
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -144,15 +147,122 @@ class ModelInfo:
 
     @property
     def supports_tools(self) -> bool:
-        if not self.capabilities:
-            return True  # asumimos si no hay info
-        return bool(self.capabilities.get("tools", True))
+        if self.capabilities:
+            return bool(self.capabilities.get("tools", True))
+        support = tool_support(self)
+        return True if support is None else support
 
     @property
     def params_b(self) -> float | None:
         """Parametros en miles de millones, deducidos del nombre."""
         m = re.search(r"(\d+(?:\.\d+)?)\s*[bB]\b", self.model_id)
         return float(m.group(1)) if m else None
+
+
+# --------------------------------------------------------------------------- #
+# Metadata de models.dev (la cache que mantiene OpenCode)
+# --------------------------------------------------------------------------- #
+
+MODELS_CACHE_ENV = "ORQ_MODELS_CACHE"
+
+
+def models_cache_path() -> Path:
+    raw = os.environ.get(MODELS_CACHE_ENV)
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".cache" / "opencode" / "models.json"
+
+
+@dataclass(frozen=True)
+class ModelMeta:
+    """Lo que OpenCode ya sabe de un modelo. None = no hay dato, no es False."""
+
+    tool_call: bool | None = None
+    context: int | None = None
+    variants: tuple[str, ...] = ()
+    variants_known: bool = False  # False: el modelo declara variantes que no se pueden enumerar
+
+
+_META_CACHE: dict[tuple[str, int], dict[tuple[str, str], ModelMeta]] = {}
+
+
+def _parse_models_meta(data: dict) -> dict[tuple[str, str], ModelMeta]:
+    meta: dict[tuple[str, str], ModelMeta] = {}
+    for provider, spec in data.items():
+        if not isinstance(spec, dict):
+            continue
+        models = spec.get("models")
+        if not isinstance(models, dict):
+            continue
+        for model_id, entry in models.items():
+            if not isinstance(entry, dict):
+                continue
+            limit = entry.get("limit")
+            context = limit.get("context") if isinstance(limit, dict) else None
+            options = entry.get("reasoning_options")
+            variants: list[str] = []
+            variants_known = True
+            if isinstance(options, list) and options:
+                effort = [o for o in options if isinstance(o, dict) and o.get("type") == "effort"]
+                if effort:
+                    for option in effort:
+                        variants.extend(str(v) for v in (option.get("values") or []))
+                else:
+                    # toggle / budget_tokens: existen variantes pero no sabemos sus ids.
+                    variants_known = False
+            tool_call = entry.get("tool_call")
+            meta[(str(provider), str(model_id))] = ModelMeta(
+                tool_call=tool_call if isinstance(tool_call, bool) else None,
+                context=context if isinstance(context, int) else None,
+                variants=tuple(dict.fromkeys(variants)),
+                variants_known=variants_known,
+            )
+    return meta
+
+
+def load_models_meta(path: Path | None = None) -> dict[tuple[str, str], ModelMeta]:
+    """Lee la cache de models.dev. Devuelve {} si no existe o esta corrupta."""
+    target = path or models_cache_path()
+    try:
+        stamp = target.stat().st_mtime_ns
+    except OSError:
+        return {}
+    key = (str(target), stamp)
+    if key not in _META_CACHE:
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        _META_CACHE.clear()  # solo interesa la cache vigente
+        _META_CACHE[key] = _parse_models_meta(data) if isinstance(data, dict) else {}
+    return _META_CACHE[key]
+
+
+def meta_for(ref: str | None) -> ModelMeta | None:
+    """Metadata de un `provider/model` (ignora el sufijo #variant)."""
+    if not ref:
+        return None
+    base = ref.split("#", 1)[0].strip()
+    provider, _, model_id = base.partition("/")
+    if not model_id:
+        return None
+    return load_models_meta().get((provider, model_id))
+
+
+def tool_support(model: ModelInfo) -> bool | None:
+    """True/False si hay dato; None si no se puede verificar (modelo local, por ejemplo)."""
+    if model.capabilities and "tools" in model.capabilities:
+        return bool(model.capabilities["tools"])
+    meta = meta_for(model.ref)
+    return meta.tool_call if meta is not None else None
+
+
+def variant_support(ref: str, variant: str) -> bool | None:
+    """True/False si la variante existe; None si no hay datos para afirmarlo."""
+    meta = meta_for(ref)
+    if meta is None or not meta.variants_known:
+        return None
+    return variant in meta.variants
 
 
 def extract_providers(config: dict, source_config: Path | None = None) -> dict[str, Provider]:

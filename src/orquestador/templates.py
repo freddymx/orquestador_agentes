@@ -28,8 +28,28 @@ def _deny_all(actions: list[str]) -> list[str]:
     return lines
 
 
+def _deny(action: str, resource: str) -> list[str]:
+    return [f"  - action: {action}", f'    resource: "{resource}"', "    effect: deny"]
+
+
 def _allow(action: str, resource: str) -> list[str]:
     return [f"  - action: {action}", f"    resource: {resource}", "    effect: allow"]
+
+
+SECRET_ACTIONS = ("read", "edit")
+
+# Guardarrailes, no un sandbox: el shell se compara como texto y se puede sortear
+# con alias o rutas absolutas. Sirven para que el agente local no saque datos por
+# accidente, no para parar a alguien que quiera hacerlo.
+NETWORK_SHELL_PATTERNS = ("curl *", "wget *", "nc *", "ssh *", "scp *", "git push *")
+
+
+def _secret_rules(profile: ProjectProfile, actions=SECRET_ACTIONS) -> list[str]:
+    lines: list[str] = []
+    for secret in profile.secret_paths[:20]:
+        for action in actions:
+            lines += _deny(action, secret)
+    return lines
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +170,8 @@ def orchestrator_agent(plan: OrchestrationPlan) -> str:
         "y te responde a ti. Delega siempre: no escribe codigo directamente."
     )
     lines = _frontmatter(primary, description)
-    lines += _deny_all(["edit", "write", "subagent", "shell"])
+    lines += _deny_all(["external_directory", "edit", "subagent", "shell"])
+    lines += _secret_rules(plan.profile, ("read",))
     for target in plan.delegation_targets:
         lines += _allow("subagent", target)
     lines.append("---")
@@ -170,15 +191,17 @@ def local_agent(plan: OrchestrationPlan, agent: AgentPlan) -> str:
         "Usalo para leer, buscar y editar en masa sin que nada salga de este equipo."
     )
     lines = _frontmatter(agent, description)
-    lines += _deny_all(["subagent", "webfetch", "websearch"])
-    for secret in profile.secret_paths[:20]:
-        lines += ["  - action: read", f'    resource: "{secret}"', "    effect: deny"]
-        lines += ["  - action: edit", f'    resource: "{secret}"', "    effect: deny"]
+    lines += _deny_all(["external_directory", "subagent", "webfetch", "websearch"])
+    for pattern in NETWORK_SHELL_PATTERNS:
+        lines += _deny("shell", pattern)
+    lines += _secret_rules(profile)
     lines.append("---")
     lines.append("")
     body = [
         "Eres un agente para tareas sencillas que trabaja en el equipo del usuario con un modelo local.",
-        "Nada de lo que hagas sale de aqui.",
+        "Tu modelo corre en esta maquina: lo que lees no se envia a ningun proveedor.",
+        "Los comandos de red (curl, wget, ssh, scp, git push) estan bloqueados: si necesitas red,",
+        "para y dilo en el resumen en vez de buscar un rodeo.",
         "",
         "## Como trabajas",
         "",
@@ -219,9 +242,10 @@ def cheap_agent(plan: OrchestrationPlan, agent: AgentPlan) -> str:
         "redaccion simple, buscar referencias, primera pasada de refactors."
     )
     lines = _frontmatter(agent, description)
-    lines += _deny_all(["subagent", "webfetch"])
+    lines += _deny_all(["external_directory", "subagent", "webfetch"])
     lines += ["  - action: shell", '    resource: "*"', "    effect: ask"]
     lines += ["  - action: edit", '    resource: "*"', "    effect: ask"]
+    lines += _secret_rules(plan.profile)
     lines.append("---")
     lines.append("")
     body = [
@@ -242,6 +266,7 @@ def cheap_agent(plan: OrchestrationPlan, agent: AgentPlan) -> str:
         "",
         "- No tomas decisiones de diseño.",
         "- No refactorizas la arquitectura.",
+        "- No lees ni editas ficheros de secretos (.env, claves): estan denegados y tu modelo no es local.",
         "- Si la tarea es ambigua, eliges la interpretacion mas conservadora, la haces y avisas de la",
         "  suposicion en el resumen.",
         "",
@@ -268,15 +293,14 @@ def specialist_agent(plan: OrchestrationPlan, agent: AgentPlan) -> str:
         "diseno de solucion, refactors grandes y debugging. Puede editar ficheros."
     )
     lines = _frontmatter(agent, description)
-    lines += _deny_all(["subagent", "webfetch", "websearch"])
+    lines += _deny_all(["external_directory", "subagent", "webfetch", "websearch"])
     # El especialista es el unico agente caro con permiso de editar, asi que puede
     # (y debe) sacar el trabajo mecanico a los agentes baratos en vez de hacerlo con
     # su propio contexto.
     mechanical = [a.name for a in plan.subagents if a.tier in ("local", "cheap")]
     for target in mechanical:
         lines += _allow("subagent", target)
-    for secret in profile.secret_paths[:20]:
-        lines += ["  - action: read", f'    resource: "{secret}"', "    effect: deny"]
+    lines += _secret_rules(profile)
     lines.append("---")
     lines.append("")
     delegate_hint = (

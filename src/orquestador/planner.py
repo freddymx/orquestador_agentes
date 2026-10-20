@@ -17,10 +17,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .catalog import Catalog, ModelInfo, guess_tier
+import yaml
+
+from .catalog import Catalog, ModelInfo, guess_tier, meta_for
 from .scan import ProjectProfile
 
 TIER_LABELS = {"frontier": "frontera", "cheap": "barato", "local": "local"}
+
+
+class StrategyError(ValueError):
+    """Estrategia ilegible: el CLI lo convierte en un error con mensaje, sin traceback."""
 
 
 # --------------------------------------------------------------------------- #
@@ -31,7 +37,7 @@ TIER_LABELS = {"frontier": "frontera", "cheap": "barato", "local": "local"}
 @dataclass
 class Strategy:
     orchestrator_model: str | None = None
-    orchestrator_variant: str = "high"
+    orchestrator_variant: str | None = None
     local_model: str | None = None
     cheap_model: str | None = None
     specialist_model: str | None = None
@@ -45,8 +51,6 @@ class Strategy:
 
 
 def _load_yaml(text: str) -> dict:
-    import yaml
-
     data = yaml.safe_load(text)
     return data if isinstance(data, dict) else {}
 
@@ -54,7 +58,11 @@ def _load_yaml(text: str) -> dict:
 def load_strategy(path: Path | None) -> Strategy:
     if path is None or not path.exists():
         return Strategy()
-    return strategy_from_mapping(_load_yaml(path.read_text(encoding="utf-8")))
+    try:
+        data = _load_yaml(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise StrategyError(f"no se pudo leer {path.name}: {exc}") from None
+    return strategy_from_mapping(data)
 
 
 AUTO_VALUES = (None, "", "auto", "none", "null", "—", "-")
@@ -68,15 +76,49 @@ def _clean(value) -> str | None:
     return None if text.lower() in AUTO_VALUES else text
 
 
+def _steps(value, default: int, field_name: str) -> int:
+    if value is None:
+        return default
+    try:
+        steps = int(value)
+    except (TypeError, ValueError):
+        raise StrategyError(
+            f"{field_name}: 'steps' debe ser un entero positivo (valor recibido: {value!r})"
+        ) from None
+    if steps <= 0:
+        raise StrategyError(f"{field_name}: 'steps' debe ser mayor que 0 (valor recibido: {steps})")
+    return steps
+
+
+def _variant(value) -> str | None:
+    """None = automatico; 'none' = sin variante; otro = variante explicita."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in ("", "auto", "null", "—", "-"):
+        return None
+    if text in ("none", "default"):
+        return "none"
+    return text
+
+
+def _rules(value) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
 def strategy_from_mapping(data: dict) -> Strategy:
     strategy = Strategy()
     if not isinstance(data, dict):
         return strategy
     strategy.orchestrator_model = _clean(data.get("orchestrator_model") or data.get("orquestador_model"))
-    strategy.orchestrator_variant = data.get("orchestrator_variant") or strategy.orchestrator_variant
+    strategy.orchestrator_variant = _variant(data.get("orchestrator_variant"))
     strategy.default_agent = bool(data.get("default_agent", True))
-    strategy.scope = data.get("scope") or strategy.scope
-    strategy.extra_rules = [str(r) for r in (data.get("rules") or [])]
+    strategy.scope = str(data.get("scope") or strategy.scope).strip().lower()
+    strategy.extra_rules = _rules(data.get("rules"))
     subagents = data.get("subagents") or {}
     if isinstance(subagents, dict):
         local = subagents.get("local") or {}
@@ -84,23 +126,33 @@ def strategy_from_mapping(data: dict) -> Strategy:
         spec = subagents.get("especialista") or subagents.get("specialist") or {}
         if isinstance(local, dict):
             strategy.local_model = _clean(local.get("model"))
-            strategy.local_steps = int(local.get("steps", strategy.local_steps))
+            strategy.local_steps = _steps(local.get("steps"), strategy.local_steps, "subagents.local")
         if isinstance(cheap, dict):
             strategy.cheap_model = _clean(cheap.get("model"))
-            strategy.cheap_steps = int(cheap.get("steps", strategy.cheap_steps))
+            strategy.cheap_steps = _steps(cheap.get("steps"), strategy.cheap_steps, "subagents.barato")
         if isinstance(spec, dict):
             strategy.specialist_model = _clean(spec.get("model"))
-            strategy.specialist_steps = int(spec.get("steps", strategy.specialist_steps))
+            strategy.specialist_steps = _steps(
+                spec.get("steps"), strategy.specialist_steps, "subagents.especialista"
+            )
             strategy.add_specialist = bool(spec.get("enabled", strategy.add_specialist))
     return strategy
 
 
+def _yaml_string(text: str) -> str:
+    """Escalar YAML entre comillas, seguro ante comillas y saltos de linea."""
+    import json
+
+    return json.dumps(text, ensure_ascii=False)
+
+
 def save_strategy(path: Path, strategy: Strategy, project: str) -> str:
+    safe_project = " ".join(str(project).splitlines())
     lines = [
-        f"# Estrategia generada por orquestador para: {project}",
+        f"# Estrategia generada por orquestador para: {safe_project}",
         "# Edita y vuelve a ejecutar: orq generate --strategy <este fichero>",
         f"orchestrator_model: {strategy.orchestrator_model or 'auto'}",
-        f"orchestrator_variant: {strategy.orchestrator_variant}",
+        f"orchestrator_variant: {strategy.orchestrator_variant or 'auto'}",
         f"default_agent: {str(strategy.default_agent).lower()}",
         f"scope: {strategy.scope}",
         "subagents:",
@@ -116,7 +168,7 @@ def save_strategy(path: Path, strategy: Strategy, project: str) -> str:
     if strategy.extra_rules:
         lines.append("rules:")
         for rule in strategy.extra_rules:
-            lines.append(f'  - "{rule}"')
+            lines.append(f"  - {_yaml_string(rule)}")
     text = "\n".join(lines) + "\n"
     path.write_text(text, encoding="utf-8")
     return text
@@ -252,9 +304,54 @@ def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | N
             )
 
     orchestrator_ref = strategy.orchestrator_model
-    variant = (strategy.orchestrator_variant or "").strip()
-    if orchestrator_ref and variant and variant.lower() not in ("none", "default"):
-        orchestrator_ref = f"{orchestrator_ref}#{variant}"
+    base_ref, _, inline_variant = (orchestrator_ref or "").partition("#")
+    raw_variant = (strategy.orchestrator_variant or "").strip().lower()
+    disable_variant = raw_variant in ("none", "default")
+    requested = None if disable_variant else (_clean(strategy.orchestrator_variant) or _clean(inline_variant))
+    if requested:
+        requested = requested.lower()  # las variantes de models.dev son minusculas
+    if requested and inline_variant and _clean(inline_variant) not in (None, requested):
+        notes.append(
+            f"La estrategia pide la variante '{requested}' y el modelo ya lleva '#{inline_variant}': "
+            f"se usa '{requested}'."
+        )
+
+    base_ref = _clean(base_ref)
+    meta = meta_for(base_ref) if base_ref else None
+    variant = requested
+    if variant is None and not disable_variant and meta is not None:
+        # Automatico: solo el esfuerzo alto, y solo si el modelo lo declara.
+        if meta.variants_known and "high" in meta.variants:
+            variant = "high"
+
+    # Solo se anade #variante si el modelo la declara en models.dev: una variante
+    # desconocida es un error de resolucion de modelo en OpenCode, no un aviso.
+    orchestrator_ref = base_ref
+    if base_ref and variant:
+        if meta is None:
+            orchestrator_ref = f"{base_ref}#{variant}"
+            notes.append(
+                f"No se pudo verificar la variante '{variant}' de {base_ref}: se aplica tal cual."
+            )
+        elif not meta.variants_known:
+            notes.append(
+                f"{base_ref} declara variantes que no se pueden enumerar: se omite '#{variant}'."
+            )
+        elif variant in meta.variants:
+            orchestrator_ref = f"{base_ref}#{variant}"
+        else:
+            disponibles = ", ".join(meta.variants) or "ninguna"
+            notes.append(
+                f"Variante '{variant}' no disponible en {base_ref} (disponibles: {disponibles}): "
+                "se omite."
+            )
+
+    # La estrategia guardada refleja lo que se ha aplicado de verdad.
+    strategy.orchestrator_model = base_ref
+    if disable_variant:
+        strategy.orchestrator_variant = "none"
+    else:
+        strategy.orchestrator_variant = requested or "auto"
 
     agents.append(
         AgentPlan(

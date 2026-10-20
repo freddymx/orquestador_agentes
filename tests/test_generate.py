@@ -47,10 +47,11 @@ def test_orchestrator_denies_editing_and_allows_subagents(tmp_path):
     _laravel_project(tmp_path)
     plan = _plan_for(tmp_path)
     text = render_agent(plan, plan.orchestrator)
-    for action in ("edit", "write", "subagent", "shell"):
+    for action in ("edit", "subagent", "shell", "external_directory"):
         assert f"  - action: {action}\n    resource: \"*\"\n    effect: deny" in text
     for target in plan.delegation_targets:
         assert f"resource: {target}\n    effect: allow" in text
+    assert 'action: read\n    resource: ".env"' in text  # no lee secretos
     assert "default_agent" not in text  # va en opencode.jsonc
     assert "`./vendor/bin/pest`" in text  # el comando de tests aparece en el prompt
 
@@ -80,7 +81,10 @@ def test_specialist_can_edit_but_not_internet(tmp_path):
     plan = _plan_for(tmp_path)
     spec = next(a for a in plan.subagents if a.name == "especialista")
     text = render_agent(plan, spec)
-    assert "action: edit" not in text.split("---")[1]  # no lo deniega
+    front = text.split("---")[1]
+    assert 'action: edit\n    resource: "*"' not in front  # puede editar el proyecto
+    assert 'action: edit\n    resource: ".env"\n    effect: deny' in front  # pero no secretos
+    assert 'action: read\n    resource: ".env"\n    effect: deny' in front
     assert "action: subagent\n    resource: \"*\"\n    effect: deny" in text
     assert "Laravel" in text
 
@@ -185,11 +189,12 @@ def test_force_never_clobbers_existing_config(tmp_path):
     cfg = tmp_path / "opencode.jsonc"
     original = cfg.read_text()
     write_plan(plan, tmp_path, force=True)
-    assert cfg.read_text() != "" or True
-    # el contenido original debe seguir dentro (providers intactos)
     current = cfg.read_text()
+    assert '"default_agent": "orquestador"' in current
+    # el contenido original debe seguir dentro (providers intactos)
     assert "llamacpp" in current
     assert "192.168.31.93" in current or "localhost:8080" in current
+    assert "Qwen local" in current  # no se pierde ningun modelo declarado
     assert original.strip() != ""
 
 
@@ -226,4 +231,4 @@ def test_patch_default_agent_is_idempotent(tmp_path):
 
     cfg = tmp_path / "opencode.jsonc"
     cfg.write_text(json.dumps({"$schema": "x", "default_agent": "orquestador"}), encoding="utf-8")
-    assert patch_default_agent(cfg, "orquestador") is False
+    assert patch_default_agent(cfg, "orquestador") is None

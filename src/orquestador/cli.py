@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NoReturn
 
 import typer
 from rich.console import Console
@@ -14,6 +15,7 @@ from .cost import DEFAULT_MIX
 from .cost import estimate as estimate_plan
 from .planner import (
     Strategy,
+    StrategyError,
     auto_strategy,
     build_plan,
     load_strategy,
@@ -51,6 +53,35 @@ TIER_STYLE = {"frontier": "bold magenta", "cheap": "green", "local": "orange", "
 
 def _resolve_dir(directory: str | None) -> Path:
     return Path(directory).resolve() if directory else Path.cwd()
+
+
+SCOPES = ("project", "global")
+
+
+def _fail(message: str) -> NoReturn:
+    console.print(f"[red]Error:[/red] {message}")
+    raise typer.Exit(2)
+
+
+def _resolve_scope(scope: str | None, strategy: Strategy | None = None) -> str:
+    """Prioridad: --scope explicito > scope de la estrategia > project."""
+    value = (scope or (strategy.scope if strategy else None) or "project").strip().lower()
+    if value not in SCOPES:
+        _fail(f"scope debe ser 'project' o 'global' (recibido: '{value}')")
+    return value
+
+
+def _strategy_path(project_dir: Path, strategy_file: Path | None) -> Path:
+    return Path(strategy_file) if strategy_file else project_dir / STRATEGY_FILE
+
+
+def _load_strategy_file(path: Path, required: bool = False) -> Strategy:
+    if required and not path.exists():
+        _fail(f"No existe la estrategia: {path}")
+    try:
+        return load_strategy(path if path.exists() else None)
+    except StrategyError as exc:
+        _fail(f"Estrategia invalida en {path}: {exc}")
 
 
 def _load_context(project_dir: Path, probe: bool, endpoint: list[str] | None, timeout: float):
@@ -221,7 +252,7 @@ def models(
 @app.command()
 def init(
     directory: str = typer.Option(".", "--dir", "-d", help="Proyecto a orquestar"),
-    scope: str = typer.Option("project", "--scope", help="project | global"),
+    scope: str = typer.Option(None, "--scope", help="project | global (por defecto: project)"),
     probe: bool = typer.Option(True, "--probe/--no-probe", help="Sondear endpoints locales"),
     force: bool = typer.Option(False, "--force", help="Sobrescribir agentes existentes"),
 ):
@@ -229,6 +260,7 @@ def init(
     project_dir = _resolve_dir(directory)
     profile, catalog, _ = _load_context(project_dir, probe, None, 2.0)
     strategy, notes = auto_strategy(catalog, profile)
+    resolved_scope = _resolve_scope(scope, strategy)
 
     console.print(Panel(
         f"{profile.name} · {profile.stack_label}\n"
@@ -263,7 +295,7 @@ def init(
         console.print("[yellow]Cancelado. No se ha escrito nada.[/yellow]")
         raise typer.Exit(0)
 
-    result = write_plan(plan, project_dir, scope=scope, force=force)
+    result = write_plan(plan, project_dir, scope=resolved_scope, force=force)
     _report(result)
     raise typer.Exit(0)
 
@@ -364,7 +396,7 @@ def _choose(options, current: str | None, label: str) -> str | None:
 def generate(
     directory: str = typer.Option(".", "--dir", "-d"),
     strategy_file: Path = typer.Option(None, "--strategy", "-s", help=f"Estrategia YAML (por defecto {STRATEGY_FILE})"),
-    scope: str = typer.Option("project", "--scope"),
+    scope: str = typer.Option(None, "--scope", help="project | global (por defecto: el de la estrategia)"),
     orchestrator_model: str = typer.Option(None, "--orchestrator-model"),
     cheap_model: str = typer.Option(None, "--cheap-model"),
     local_model: str = typer.Option(None, "--local-model"),
@@ -376,10 +408,11 @@ def generate(
 ):
     """Genera los agentes de forma no interactiva usando la estrategia."""
     project_dir = _resolve_dir(directory)
-    sf = strategy_file or (project_dir / STRATEGY_FILE)
-    strategy = load_strategy(sf if Path(sf).exists() else None)
-    if not Path(sf).exists():
+    sf = _strategy_path(project_dir, strategy_file)
+    strategy = _load_strategy_file(sf, required=strategy_file is not None)
+    if not sf.exists():
         console.print(f"[dim]No hay estrategia en {sf}: se usara la seleccion automatica.[/dim]")
+    resolved_scope = _resolve_scope(scope, strategy)
 
     for attr, value in (
         ("orchestrator_model", orchestrator_model),
@@ -419,9 +452,10 @@ def generate(
     _preview(plan)
 
     if dry_run:
+        target_dir = agents_dir(resolved_scope, project_dir)
         for agent in plan.agents:
             console.print(Panel(
-                (project_dir / ".opencode" / "agents" / f"{agent.name}.md").as_posix(),
+                (target_dir / f"{agent.name}.md").as_posix(),
                 title=f"{agent.name}.md",
                 border_style="dim",
             ))
@@ -430,10 +464,10 @@ def generate(
             console.print(render_agent(plan, agent))
         raise typer.Exit(0)
 
-    result = write_plan(plan, project_dir, scope=scope, force=force)
+    result = write_plan(plan, project_dir, scope=resolved_scope, force=force)
     _report(result)
 
-    problems = validate(project_dir, scope=scope, catalog=catalog, strategy=plan.strategy)
+    problems = validate(project_dir, scope=resolved_scope, catalog=catalog, strategy=plan.strategy)
     for level, message in problems:
         console.print(f"[{'red' if level == 'error' else 'yellow'}]{level}[/] {message}")
     raise typer.Exit(1 if any(level == "error" for level, _ in problems) else 0)
@@ -447,17 +481,18 @@ def generate(
 @app.command()
 def check(
     directory: str = typer.Option(".", "--dir", "-d"),
-    scope: str = typer.Option("project", "--scope"),
+    scope: str = typer.Option(None, "--scope", help="project | global (por defecto: el de la estrategia)"),
     probe: bool = typer.Option(True, "--probe/--no-probe"),
     as_json: bool = typer.Option(False, "--json"),
 ):
     """Valida los agentes generados contra el catalogo de modelos."""
     project_dir = _resolve_dir(directory)
+    strategy = _load_strategy_file(project_dir / STRATEGY_FILE)
+    resolved_scope = _resolve_scope(scope, strategy)
     config, sources = merge_configs(project_dir)
     catalog = build_catalog(config, sources, project_dir, probe=probe, timeout=1.5)
-    strategy = load_strategy(project_dir / STRATEGY_FILE)
 
-    problems = validate(project_dir, scope=scope, catalog=catalog, strategy=strategy)
+    problems = validate(project_dir, scope=resolved_scope, catalog=catalog, strategy=strategy)
     if as_json:
         console.print_json(data={
             "ok": not any(level == "error" for level, _ in problems),
@@ -491,8 +526,8 @@ def compare(
 ):
     """Estima el coste del plan frente a hacerlo todo con el modelo del orquestador."""
     project_dir = _resolve_dir(directory)
-    sf = strategy_file or (project_dir / STRATEGY_FILE)
-    strategy = load_strategy(sf if Path(sf).exists() else None)
+    sf = _strategy_path(project_dir, strategy_file)
+    strategy = _load_strategy_file(sf, required=strategy_file is not None)
     profile, catalog, _ = _load_context(project_dir, probe, None, 2.0)
     plan = build_plan(profile, catalog, strategy)
 
@@ -562,14 +597,22 @@ def compare(
 @app.command()
 def agents(
     directory: str = typer.Option(".", "--dir", "-d"),
-    scope: str = typer.Option("project", "--scope"),
+    scope: str = typer.Option(None, "--scope", help="project | global (por defecto: el de la estrategia)"),
     show: str = typer.Option(None, "--show", help="Imprime el cuerpo del agente indicado"),
     probe: bool = typer.Option(True, "--probe/--no-probe", help="Aceptado por uniformidad; aqui no se sondea"),
     as_json: bool = typer.Option(False, "--json"),
 ):
     """Lista los agentes generados y su reparto."""
     project_dir = _resolve_dir(directory)
-    target = agents_dir(scope, project_dir)
+    strategy = None
+    strategy_path = project_dir / STRATEGY_FILE
+    if strategy_path.exists():
+        try:
+            strategy = load_strategy(strategy_path)
+        except StrategyError:
+            strategy = None  # listar no debe fallar por una estrategia rota
+    resolved_scope = _resolve_scope(scope, strategy)
+    target = agents_dir(resolved_scope, project_dir)
     if not target.is_dir():
         console.print(f"[yellow]No hay agentes en {target}. Ejecuta primero: orq init[/yellow]")
         raise typer.Exit(1)
@@ -594,7 +637,7 @@ def agents(
 
     if as_json:
         console.print_json(data={
-            "scope": scope,
+            "scope": resolved_scope,
             "agents": [
                 {
                     "name": path.stem,
@@ -612,7 +655,7 @@ def agents(
         })
         raise typer.Exit(0)
 
-    table = Table(title=f"Agentes ({scope})", header_style="dim")
+    table = Table(title=f"Agentes ({resolved_scope})", header_style="dim")
     table.add_column("agente")
     table.add_column("modo")
     table.add_column("modelo")
