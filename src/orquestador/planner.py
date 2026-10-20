@@ -30,7 +30,7 @@ CUSTOM_TIERS = ("local", "cheap", "frontier")
 CUSTOM_PERMISSIONS = ("read", "edit", "full")
 RESERVED_AGENTS = {"orquestador", "local", "barato", "especialista", "specialist"}
 AGENT_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
-SAFE_SCALAR = re.compile(r"^[A-Za-z0-9._:/@+-]+(?:#[A-Za-z0-9._-]+)?$")
+SAFE_SCALAR = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]*(?:#[A-Za-z0-9._-]+)?$")
 
 
 def yaml_scalar(value: object) -> str:
