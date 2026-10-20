@@ -8,14 +8,14 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
 
 - `uv sync` — the only dependency entrypoint. `src/` layout + hatchling means
   `import orquestador` works inside the uv env, not from a bare `python`.
-- `uv run pytest` — full suite (~0.6s, 181 tests). One test:
+- `uv run pytest` — full suite (~0.6s, 191 tests). One test:
   `uv run pytest tests/test_generate.py::test_force_never_clobbers_existing_config`.
   `tests/conftest.py` points `ORQ_MODELS_CACHE` at a missing file: tests must not depend on
   the machine's models.dev cache. Use the `models_cache` fixture to inject fake metadata.
 - `uv run ruff check .` — correctness rules only (`E4/E7/E9/F`); `line-length = 100` is set
   for formatting, not enforced as E501.
 - `uv run mypy` — typed over `src/orquestador` (`check_untyped_defs`). Both run in CI
-  (`.github/workflows/ci.yml`) on Python 3.11 and 3.12; keep the baseline green.
+  (`.github/workflows/ci.yml`) on Python 3.11, 3.12 and 3.13; keep the baseline green.
 - The global `orq` is installed editable (`uv tool install -e .`), so `src/` edits are live
   without reinstalling. New `[project].dependencies` are the exception: re-run
   `uv tool install -e .` to refresh the tool env.
@@ -47,11 +47,14 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
   "simplify" this back to `json.dumps`.
 - Every write goes through `fsutil.atomic_write_text` (temp file in the same directory +
   `os.replace`), so a crash cannot leave a half-written agent or config. `--backup` copies the
-  previous version to `<name>.bak` before overwriting; it is opt-in and never creates backups
-  when the file does not exist.
+  previous agent/strategy to `<name>.bak`; it is opt-in, never creates backups when the file
+  does not exist, and **never copies `opencode.jsonc`** because it may contain `apiKey`.
+  `backup_file` also refuses symlinks.
 - `orq diff` renders the same `planned_files` as `write_plan` without touching disk, prints a
-  unified diff and exits `1` when something would change (`0` when up to date). Keep both
-  paths backed by `planned_files` so diff cannot drift from generate.
+  unified diff and exits `1` when something would change (`0` when up to date). The config
+  diff is deliberately omitted from human output (it can contain credentials); the JSON
+  payload still reports its status. Keep both paths backed by `planned_files` so diff cannot
+  drift from generate.
 - `--force` rewrites only agent `.md` files. A named regression test covers this — do not
   "simplify" it away.
 - Permissions serialize as `permissions: [{action, resource, effect}]` and evaluation is
@@ -62,7 +65,8 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
   `subagent: "*"`, and allow each delegated agent by name; `validate()` reports violations
   as `error`. `write` is not a V2 action (`edit` covers edit/write/patch): do not emit or
   require it. `default_agent` goes in `opencode.jsonc`, never in an agent file.
-- Every agent denies `external_directory: "*"` and `read`/`edit` on `profile.secret_paths`.
+- Every agent denies `external_directory: "*"` and `read`/`edit` on every path in
+  `profile.secret_paths` (the scan itself caps at 4000 files and 50 secret paths).
   `local` also denies network shell patterns. Keep this policy when adding a renderer.
 - `subagents.*.enabled: false` drops that agent from the plan (and its delegation allow-list);
   `generate` never deletes an existing `.md` for it, it only warns. Disabling is a plan-level
@@ -98,11 +102,17 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
   command for a script that does not exist.
 - Model refs are `provider/model` with optional `#variant`; helpers strip the variant when
   resolving. `Catalog.find` accepts the full ref or the bare model id.
+- Model refs come from config or HTTP probes, so they are untrusted. Every dynamic scalar
+  written to YAML/JSON goes through `planner.yaml_scalar` (or `json.dumps`): a newline or
+  quote must never inject frontmatter keys, strategy keys or provider JSON. Secret paths in
+  permission rules are always `json.dumps`-quoted.
 - `orchestrator_variant: auto` (the default) applies `high` only when models.dev declares it;
   unknown models get no variant. A declared-but-missing variant is dropped with a note, never
   emitted: OpenCode treats an unknown variant as a model-resolution error. `none` disables it.
 - `write_plan` copies the effective `scope` into the saved strategy, and `generate`/`check`/
-  `agents` prefer `--scope` > strategy > `project`. Preserve that precedence.
+  `agents` prefer `--scope` > strategy > `project`. Preserve that precedence, but `generate`
+  must reject a `scope: global` inherited from the repo strategy unless `--scope global` is
+  explicit: a cloned repo must not write into `~/.config/opencode` on its own.
 - `<models.dev>` is the source of truth for price, `context`, `tool_call` and variants.
   `meta_for` tries `(provider, model_id)` first, then a **unique** model-id match for
   proxies; ambiguous ids return `None` rather than guess a price. `price_of` precedence is
@@ -112,7 +122,9 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
   the budget. Tests lock the mixed plan at `$0.3654` / 79.7% savings: removing the
   redistribution reintroduces the old inflated ~92%.
 - Tests must stay offline: pass `probe=False` to `build_catalog` (the CLI defaults to probing
-  with a 2s timeout). Unreachable endpoints must yield `[]`, never raise.
+  with a 2s timeout). Unreachable endpoints must yield `[]`, never raise. `probe_models` only
+  accepts `http`/`https` and caps the response at 1 MB; do not let a repo-controlled
+  `baseURL` turn into a local-file read or an unbounded allocation.
 - Tier values are English in code and `--json` (`frontier`/`cheap`/`local`). Spanish labels
   (`frontera`/`barato`/`local`) are display-only via `TIER_LABELS` / `TIER_TITLES`.
 - User-facing text, comments and generated prompts are Spanish; tests assert substrings such as

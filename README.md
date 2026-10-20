@@ -188,20 +188,37 @@ sobrescribe a ciegas, porque ahí viven tus providers, MCP y credenciales:
 - Si el fichero no es JSONC válido, no se toca y te dice qué línea añadir a mano.
 
 Todas las escrituras son atómicas (fichero temporal + rename), así que una interrupción
-no deja agentes a medias. Para conservar la versión anterior antes de sobrescribir:
+no deja agentes a medias. Para conservar la versión anterior de agentes y estrategia:
 
 ```bash
-orq generate --force --backup   # deja <agente>.md.bak y opencode.jsonc.bak
+orq generate --force --backup   # deja <agente>.md.bak y .orquestador.yaml.bak
 ```
+
+**No se hace copia de `opencode.jsonc`**: ese fichero puede contener `apiKey`, tokens o
+credenciales de MCP, y un `.bak` dentro del proyecto es una fuga fácil de commitear. Si
+necesitas una copia, hazla tú fuera del repo y con permisos `0600`.
 
 `orq diff` usa exactamente el mismo cálculo que `orq generate` pero no escribe nada:
 imprime un diff unificado por fichero y sale con código 1 si hay diferencias (0 si está
-al día). Es la forma barata de revisar un cambio de estrategia en CI o antes de aplicar:
+al día). El diff de `opencode.jsonc` se omite a propósito para no volcar credenciales en
+la terminal o en los logs de CI:
 
 ```bash
 orq diff
 orq diff --json | jq '.files[] | select(.status != "unchanged")'
 ```
+
+### Modelo de confianza
+
+`orq` es un generador de configuración, no un sandbox. No ejecuta los comandos del
+proyecto, pero lee `.orquestador.yaml`, `opencode.jsonc` y los scripts de `package.json`/
+`composer.json`, y escribe agentes que OpenCode sí puede ejecutar. Trata un repo no
+confiable como código: revisa la estrategia y la config antes de generar. Para repos
+dudosos usa `--no-probe` y `--preset strict`, y no aceptes a ciegas un `scope: global`
+(la CLI exige `--scope global` explícito para escribir en `~/.config/opencode`).
+
+Los agentes personalizados con `permissions: full` pueden usar shell. Los denies de
+secretos son guardarraíles, no aislamiento: un comando shell puede saltárselos.
 
 ### Permisos de los agentes
 
@@ -218,7 +235,8 @@ ademas de la que ya describe la tabla de arriba:
   de los agentes cloud pidan confirmacion y evita que el orquestador navegue por la web.
 - En un subagente personalizado, `permissions: read` deniega `edit` y `shell`;
   `edit` (por defecto) permite editar y pide confirmacion para shell; `full` permite
-  ambos. Los secretos se deniegan siempre, incluso con `full`.
+  ambos. Los secretos detectados se deniegan, incluso con `full`, pero el escaneo tiene
+  límites (4000 ficheros y 50 rutas): no sustituye a un sandbox ni a una revisión manual.
 
 ## Estrategia: `.orquestador.yaml`
 
@@ -296,7 +314,8 @@ Campos:
 
 El orquestador recibe automaticamente permiso para delegar en cada subagente
 personalizado y una linea de enrutado con su descripcion. Todos heredan la politica de
-seguridad comun: sin `external_directory`, sin secretos y sin delegar en otros agentes.
+seguridad comun: sin `external_directory`, sin acceso a los secretos detectados y sin
+delegar en otros agentes.
 
 Cada subagente acepta `enabled: false`: no se genera su `.md`, el orquestador no lo
 ofrece como delegado y su parte del trabajo se reparte entre los que quedan (también en
@@ -349,9 +368,18 @@ uv run ruff check .  # errores reales (imports sin usar, nombres indefinidos...)
 uv run mypy          # tipado de src/orquestador
 ```
 
-La CI (`.github/workflows/ci.yml`) ejecuta las tres cosas en Python 3.11 y 3.12. Los tests
+La CI (`.github/workflows/ci.yml`) ejecuta las tres cosas en Python 3.11, 3.12 y 3.13. Los tests
 no leen la cache real de models.dev: `tests/conftest.py` la sustituye por un fichero vacio
 y el fixture `models_cache` inyecta metadatos falsos.
+
+## Seguridad
+
+Para reportar una vulnerabilidad, usa [SECURITY.md](SECURITY.md) y GitHub Security
+Advisories; no abras un issue público con un exploit.
+
+## Licencia
+
+MIT. Consulta [LICENSE](LICENSE).
 
 ## Por que Python y no Rust
 
