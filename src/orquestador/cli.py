@@ -518,6 +518,7 @@ def compare(
     directory: str = typer.Option(".", "--dir", "-d"),
     strategy_file: Path = typer.Option(None, "--strategy", "-s"),
     sessions: int = typer.Option(1, "--sessions", "-n", help="Sesiones a estimar"),
+    tokens: int = typer.Option(None, "--tokens", help="Tokens por sesion (por defecto 100000)"),
     probe: bool = typer.Option(True, "--probe/--no-probe", help="Sondear endpoints locales"),
     local_share: float = typer.Option(None, "--local-share", help="%% del trabajo que va a local (0-1)"),
     cheap_share: float = typer.Option(None, "--cheap-share"),
@@ -525,6 +526,10 @@ def compare(
     as_json: bool = typer.Option(False, "--json"),
 ):
     """Estima el coste del plan frente a hacerlo todo con el modelo del orquestador."""
+    if sessions <= 0:
+        _fail("--sessions debe ser mayor que 0")
+    if tokens is not None and tokens <= 0:
+        _fail("--tokens debe ser mayor que 0")
     project_dir = _resolve_dir(directory)
     sf = _strategy_path(project_dir, strategy_file)
     strategy = _load_strategy_file(sf, required=strategy_file is not None)
@@ -543,13 +548,16 @@ def compare(
         raise typer.Exit(1)
     mix = {k: v / total for k, v in mix.items()}
 
-    estimate = estimate_plan(plan, catalog, sessions=sessions, mix=mix)
+    estimate = estimate_plan(plan, catalog, sessions=sessions, mix=mix, token_budget=tokens)
 
     if as_json:
         console.print_json(data=estimate.as_dict())
         raise typer.Exit(0)
 
-    table = Table(title=f"Reparto de trabajo ({sessions} sesion/es)", header_style="dim")
+    table = Table(
+        title=f"Reparto de trabajo ({sessions} sesion/es, {estimate.token_budget:,} tokens)",
+        header_style="dim",
+    )
     table.add_column("agente")
     table.add_column("modelo")
     table.add_column("% trabajo")
@@ -585,7 +593,7 @@ def compare(
         console.print("[dim]* precio no publicado en el catalogo: valor estimado[/dim]")
     for note in estimate.notes:
         console.print(f"[dim]· {note}[/dim]")
-    console.print("[dim]Usa --local-share/--cheap-share para ver escenarios distintos.[/dim]")
+    console.print("[dim]Usa --local-share/--cheap-share o --tokens para ver escenarios distintos.[/dim]")
     raise typer.Exit(0)
 
 

@@ -37,9 +37,11 @@ Los agentes generados son:
 
 El reparto por defecto del trabajo es **50% local / 30% barato / 15% especialista /
 5% orquestador**, ajustable con `--local-share` / `--cheap-share` / `--specialist-share`.
-Con el reparto por defecto, un plan mixto (frontera + barato + local) sale en torno a
-un 90% mas barato que hacer todo con el modelo caro: ese es el argumento de la guia,
-en numero.
+El calculo usa **un unico presupuesto de tokens por sesion** (100k por defecto) y
+reparte la parte de los roles que no existan entre los presentes, para que el ahorro
+compare el mismo trabajo. Con precios reales de models.dev, un plan mixto suele salir
+entre un **60% y un 80%** mas barato que hacerlo todo con el modelo caro; la cifra
+exacta depende de las tarifas de tus modelos (`orq compare`).
 
 > Si no hay ningun modelo de frontera ni barato disponibles, el orquestador cae al
 > modelo local que haya y lo avisa: un orquestador sin `model` heredaria el de la sesion
@@ -124,11 +126,14 @@ orquestador):
 ```bash
 orq compare --sessions 20
 orq compare --sessions 20 --local-share 0.9 --cheap-share 0.05
+orq compare --tokens 250000 --json
 ```
 
 Compara el coste del plan con el de "que lo haga todo el padre" y muestra el ahorro.
-Los precios vienen de un catalogo embebido (marcados con `*` cuando son estimados),
-asi que sirve para **comparar escenarios entre si**, no para predecir una factura.
+Los precios salen de **models.dev** (la cache que mantiene OpenCode) cuando el modelo
+aparece alli; si no, del catalogo embebido o de un valor supuesto marcado con `*`.
+Sirve para **comparar escenarios con el mismo trabajo**, no para predecir una factura:
+los precios por tramos de contexto o cache no se modelan.
 
 ### Global (todos tus proyectos)
 

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from orquestador.catalog import build_catalog, blended_price, is_chat_model, ModelInfo, Provider
 from orquestador.cost import DEFAULT_MIX, estimate
 from orquestador.planner import Strategy, build_plan
@@ -216,6 +218,10 @@ def test_mixed_plan_saves_most_of_the_cost(tmp_path):
     est = estimate(plan, _mixed_catalog(), sessions=5)
     assert est.total_cost < est.naive_cost
     assert est.savings_ratio > 0.5
+    # Regresion: el calculo viejo daba ~92% porque los roles ausentes desaparecian.
+    assert est.savings_ratio < 0.85
+    assert est.total_cost == pytest.approx(5 * 0.3654)
+    assert sum(a.tokens for a in est.agents) == 5 * 100_000
     assert sum(a.share for a in est.agents) == 1.0
 
 

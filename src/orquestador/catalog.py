@@ -181,6 +181,14 @@ class ModelMeta:
     context: int | None = None
     variants: tuple[str, ...] = ()
     variants_known: bool = False  # False: el modelo declara variantes que no se pueden enumerar
+    input_price: float | None = None   # USD por 1M tokens
+    output_price: float | None = None
+
+
+def _number(value) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 _META_CACHE: dict[tuple[str, int], dict[tuple[str, str], ModelMeta]] = {}
@@ -211,11 +219,18 @@ def _parse_models_meta(data: dict) -> dict[tuple[str, str], ModelMeta]:
                     # toggle / budget_tokens: existen variantes pero no sabemos sus ids.
                     variants_known = False
             tool_call = entry.get("tool_call")
+            cost = entry.get("cost")
+            input_price = output_price = None
+            if isinstance(cost, dict):
+                input_price = _number(cost.get("input"))
+                output_price = _number(cost.get("output"))
             meta[(str(provider), str(model_id))] = ModelMeta(
                 tool_call=tool_call if isinstance(tool_call, bool) else None,
                 context=context if isinstance(context, int) else None,
                 variants=tuple(dict.fromkeys(variants)),
                 variants_known=variants_known,
+                input_price=input_price,
+                output_price=output_price,
             )
     return meta
 
@@ -239,14 +254,24 @@ def load_models_meta(path: Path | None = None) -> dict[tuple[str, str], ModelMet
 
 
 def meta_for(ref: str | None) -> ModelMeta | None:
-    """Metadata de un `provider/model` (ignora el sufijo #variant)."""
+    """Metadata de un `provider/model` (ignora el sufijo #variant).
+
+    Si el proveedor no aparece en models.dev (proxies, gateways propios), se acepta
+    el modelo cuando ese id existe en un unico proveedor del catalogo. Si hay varios
+    con datos distintos no se adivina: mejor un precio supuesto que uno equivocado.
+    """
     if not ref:
         return None
     base = ref.split("#", 1)[0].strip()
     provider, _, model_id = base.partition("/")
     if not model_id:
         return None
-    return load_models_meta().get((provider, model_id))
+    table = load_models_meta()
+    found = table.get((provider, model_id))
+    if found is not None:
+        return found
+    matches = {meta for (_provider, mid), meta in table.items() if mid == model_id}
+    return matches.pop() if len(matches) == 1 else None
 
 
 def tool_support(model: ModelInfo) -> bool | None:
@@ -379,17 +404,25 @@ ASSUMED_PRICE: tuple[float, float] = (1.0, 3.0)
 class Pricing:
     input: float
     output: float
-    exact: bool  # False = precio supuesto, no del catalogo
+    exact: bool  # False = precio supuesto o solo del catalogo embebido
+    source: str = ""  # models.dev | catalogo embebido | supuesto | local
 
 
 def price_of(model: ModelInfo, provider: Provider | None = None) -> Pricing | None:
-    """Precio por 1M tokens, o None si el modelo es local (coste cero)."""
+    """Precio por 1M tokens, o None si el modelo es local (coste cero).
+
+    Prioridad: local > models.dev > catalogo embebido > precio supuesto. Solo los
+    dos primeros se consideran exactos; el resto sirve para comparar escenarios.
+    """
     if provider is not None and provider.is_local:
-        return Pricing(0.0, 0.0, exact=True)
+        return Pricing(0.0, 0.0, exact=True, source="local")
+    meta = meta_for(model.ref)
+    if meta is not None and meta.input_price is not None and meta.output_price is not None:
+        return Pricing(meta.input_price, meta.output_price, exact=True, source="models.dev")
     price = known_price(model.model_id)
     if price:
-        return Pricing(price[0], price[1], exact=True)
-    return Pricing(ASSUMED_PRICE[0], ASSUMED_PRICE[1], exact=False)
+        return Pricing(price[0], price[1], exact=False, source="catalogo embebido")
+    return Pricing(ASSUMED_PRICE[0], ASSUMED_PRICE[1], exact=False, source="supuesto")
 
 
 def blended_price(model: ModelInfo, provider: Provider | None = None) -> float:
@@ -404,6 +437,10 @@ def guess_tier(model: ModelInfo, provider: Provider | None = None) -> str:
     """frontier | cheap | local"""
     if provider is not None and provider.is_local:
         return "local"
+    meta = meta_for(model.ref)
+    if meta is not None and meta.input_price is not None:
+        # Precio real publicado: es el mejor indicador de tier que tenemos.
+        return "cheap" if meta.input_price <= CHEAP_MAX_PRICE else "frontier"
     price = known_price(model.model_id)
     if price:
         return "cheap" if price[0] <= CHEAP_MAX_PRICE else "frontier"
@@ -527,6 +564,10 @@ def build_catalog(
         if not is_chat_model(model.model_id):
             excluded.append(model)
             continue
+        if model.context is None:
+            meta = meta_for(model.ref)
+            if meta is not None and meta.context:
+                model.context = meta.context
         kept.append(model)
 
     return Catalog(providers=providers, models=kept, probed=probed, excluded=excluded)
