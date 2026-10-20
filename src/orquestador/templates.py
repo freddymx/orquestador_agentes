@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 
 from .catalog import TIER_HINTS  # noqa: F401  (reexportado por comodidad)
-from .planner import AgentPlan, OrchestrationPlan
+from .planner import AgentPlan, OrchestrationPlan, yaml_scalar
 from .scan import ProjectProfile
 
 
@@ -23,7 +23,7 @@ def _frontmatter(plan: AgentPlan, description: str) -> list[str]:
     rendered = json.dumps(_one_line(description), ensure_ascii=False)
     lines = ["---", f"description: {rendered}", f"mode: {plan.role}"]
     if plan.model:
-        lines.append(f"model: {plan.model}")
+        lines.append(f"model: {yaml_scalar(plan.model)}")
     if plan.steps:
         lines.append(f"steps: {plan.steps}")
     lines.append(f'color: "{plan.color}"')
@@ -38,16 +38,24 @@ def _deny_all(actions: list[str]) -> list[str]:
 
 
 def _deny(action: str, resource: str) -> list[str]:
-    return [f"  - action: {action}", f'    resource: "{resource}"', "    effect: deny"]
+    return [
+        f"  - action: {action}",
+        f"    resource: {json.dumps(str(resource), ensure_ascii=False)}",
+        "    effect: deny",
+    ]
 
 
 def _allow(action: str, resource: str) -> list[str]:
-    rendered = '    resource: "*"' if resource == "*" else f"    resource: {resource}"
+    rendered = '    resource: "*"' if resource == "*" else f"    resource: {yaml_scalar(resource)}"
     return [f"  - action: {action}", rendered, "    effect: allow"]
 
 
 def _ask(action: str, resource: str = "*") -> list[str]:
-    return [f"  - action: {action}", f'    resource: "{resource}"', "    effect: ask"]
+    return [
+        f"  - action: {action}",
+        f"    resource: {json.dumps(str(resource), ensure_ascii=False)}",
+        "    effect: ask",
+    ]
 
 
 def _strict(plan: OrchestrationPlan) -> bool:
@@ -64,7 +72,7 @@ NETWORK_SHELL_PATTERNS = ("curl *", "wget *", "nc *", "ssh *", "scp *", "git pus
 
 def _secret_rules(profile: ProjectProfile, actions=SECRET_ACTIONS) -> list[str]:
     lines: list[str] = []
-    for secret in profile.secret_paths[:20]:
+    for secret in profile.secret_paths:
         for action in actions:
             lines += _deny(action, secret)
     return lines
@@ -111,7 +119,8 @@ def orchestrator_prompt(plan: OrchestrationPlan) -> str:
             )
         else:
             hint = _one_line(agent.reason or "trabajo especializado")
-        routing.append(f"- `{agent.name}` ({agent.model or '—'}): {hint}")
+        model_hint = " ".join(str(agent.model or "—").split()).replace("`", "'")
+        routing.append(f"- `{agent.name}` ({model_hint}): {hint}")
     if not routing:
         routing.append("- No hay subagentes configurados: no puedes delegar. Revisa la configuracion.")
 
@@ -527,16 +536,19 @@ def default_agent_snippet(agent_name: str) -> str:
 
 
 def provider_snippet(patch: dict) -> str:
+    provider = json.dumps(str(patch["provider"]), ensure_ascii=False)
+    base_url = json.dumps(str(patch["baseURL"]), ensure_ascii=False)
+    model_id = json.dumps(str(patch["model_id"]), ensure_ascii=False)
     return (
-        '"' + patch["provider"] + '": {\n'
+        f"{provider}: {{\n"
         '  "npm": "@ai-sdk/openai-compatible",\n'
-        f'  "name": "{patch["provider"]}",\n'
+        f'  "name": {provider},\n'
         '  "options": {\n'
-        f'    "baseURL": "{patch["baseURL"]}",\n'
+        f'    "baseURL": {base_url},\n'
         '    "apiKey": "local"\n'
         "  },\n"
         '  "models": {\n'
-        f'    "{patch["model_id"]}": {{ "name": "{patch["model_id"]}" }}\n'
+        f'    {model_id}: {{ "name": {model_id} }}\n'
         "  }\n"
         "}"
     )

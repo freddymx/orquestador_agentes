@@ -235,8 +235,8 @@ def patch_default_agent(path: Path, agent_name: str, backup: bool = False) -> bo
         return False
     if new == raw:
         return None
-    if backup:
-        backup_file(path)
+    # No se hace copia de opencode.jsonc: puede contener apiKey y el .bak
+    # acabaria dentro del proyecto. Los agentes y la estrategia si se copian.
     atomic_write_text(path, new)
     return True
 
@@ -340,7 +340,8 @@ def write_plan(
         if item.kind == "agent" and item.path.exists() and not force:
             skipped.append(item.path)
             continue
-        if backup:
+        # El config puede contener apiKey: no duplicarlo en un .bak del proyecto.
+        if backup and item.kind not in ("config-new", "config-patch"):
             backup_file(item.path)
         atomic_write_text(item.path, item.text)
         written.append(item.path)
@@ -524,7 +525,7 @@ def validate(
                 )
 
     for name, front in fronts.items():
-        for secret in secret_paths[:20]:
+        for secret in secret_paths:
             for action in ("read", "edit"):
                 if permission_effect(front, action, secret) != "deny":
                     problems.append(

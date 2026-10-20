@@ -50,7 +50,7 @@ def test_merge_config_prefers_project_over_global(tmp_path):
 
 def test_extract_providers_supports_both_singular_and_plural(tmp_path):
     config = {
-        "provider": {"lemonade": {"options": {"baseURL": "http://192.168.31.93:13305/v1"},
+        "provider": {"lemonade": {"options": {"baseURL": "http://10.0.0.10:13305/v1"},
                                   "models": {"M1": {"name": "M1"}}}},
         "providers": {"openai": {"options": {"baseURL": "https://api.openai.com/v1", "apiKey": "sk"}}},
     }

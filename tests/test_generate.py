@@ -193,7 +193,7 @@ def test_force_never_clobbers_existing_config(tmp_path):
     assert '"default_agent": "orquestador"' in current
     # el contenido original debe seguir dentro (providers intactos)
     assert "llamacpp" in current
-    assert "192.168.31.93" in current or "localhost:8080" in current
+    assert "10.0.0.10" in current or "localhost:8080" in current
     assert "Qwen local" in current  # no se pierde ningun modelo declarado
     assert original.strip() != ""
 

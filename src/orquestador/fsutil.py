@@ -37,8 +37,12 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 
 def backup_file(path: Path) -> Path | None:
-    """Copia `path` a `<nombre>.bak` antes de sobrescribirlo. None si no existe."""
-    if not path.exists():
+    """Copia `path` a `<nombre>.bak` antes de sobrescribirlo. None si no existe.
+
+    No sigue symlinks: copiar el destino de un `opencode.jsonc` enlazado podria
+    duplicar credenciales dentro del proyecto.
+    """
+    if not path.exists() or path.is_symlink():
         return None
     target = path.with_name(path.name + ".bak")
     shutil.copy2(path, target)

@@ -30,6 +30,21 @@ CUSTOM_TIERS = ("local", "cheap", "frontier")
 CUSTOM_PERMISSIONS = ("read", "edit", "full")
 RESERVED_AGENTS = {"orquestador", "local", "barato", "especialista", "specialist"}
 AGENT_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
+SAFE_SCALAR = re.compile(r"^[A-Za-z0-9._:/@+-]+(?:#[A-Za-z0-9._-]+)?$")
+
+
+def yaml_scalar(value: object) -> str:
+    """Escalar YAML seguro: deja intactos los valores normales y cita el resto.
+
+    Los model refs vienen de configuracion o de un endpoint HTTP; no son de fiar.
+    Un salto de linea o una comilla no puede inyectar claves en el YAML generado.
+    """
+    import json
+
+    text = str(value)
+    if SAFE_SCALAR.fullmatch(text):
+        return text
+    return json.dumps(text, ensure_ascii=False)
 
 
 class StrategyError(ValueError):
@@ -273,12 +288,12 @@ def strategy_text(strategy: Strategy, project: str) -> str:
     lines = [
         f"# Estrategia generada por orquestador para: {safe_project}",
         "# Edita y vuelve a ejecutar: orq generate --strategy <este fichero>",
-        f"orchestrator_model: {strategy.orchestrator_model or 'auto'}",
-        f"orchestrator_variant: {strategy.orchestrator_variant or 'auto'}",
+        f"orchestrator_model: {yaml_scalar(strategy.orchestrator_model or 'auto')}",
+        f"orchestrator_variant: {yaml_scalar(strategy.orchestrator_variant or 'auto')}",
         "# preset: balanced (equilibrado) | lean (un solo trabajador) | strict (sin shell)",
         f"preset: {preset}",
         f"default_agent: {str(strategy.default_agent).lower()}",
-        f"scope: {strategy.scope}",
+        f"scope: {yaml_scalar(strategy.scope)}",
         "subagents:",
     ]
     for name, model, steps, enabled in (
@@ -287,13 +302,13 @@ def strategy_text(strategy: Strategy, project: str) -> str:
         ("especialista", strategy.specialist_model, strategy.specialist_steps, strategy.add_specialist),
     ):
         lines.append(f"  {name}:")
-        lines.append(f"    model: {model or 'auto'}")
+        lines.append(f"    model: {yaml_scalar(model or 'auto')}")
         lines.append(f"    steps: {steps}")
         if not enabled:
             lines.append("    enabled: false")
     for custom in strategy.custom_agents:
         lines.append(f"  {custom.name}:")
-        lines.append(f"    model: {custom.model or 'auto'}")
+        lines.append(f"    model: {yaml_scalar(custom.model or 'auto')}")
         lines.append(f"    steps: {custom.steps}")
         if not custom.enabled:
             lines.append("    enabled: false")

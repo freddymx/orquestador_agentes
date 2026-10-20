@@ -7,3 +7,13 @@ __pycache__/
 dist/
 *.egg-info/
 .coverage
+.DS_Store
+
+# Credenciales y artefactos que puede generar orq en este repo
+.env
+.env.*
+.opencode/
+.orquestador.yaml
+*.bak
+.*.tmp
+*.tmp

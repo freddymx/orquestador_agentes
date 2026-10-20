@@ -14,6 +14,7 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -319,15 +320,30 @@ def extract_providers(config: dict, source_config: Path | None = None) -> dict[s
 # --------------------------------------------------------------------------- #
 
 
+MAX_PROBE_BYTES = 1_000_000
+
+
 def probe_models(base_url: str, timeout: float = 2.0) -> list[str]:
-    """GET {base_url}/models -> lista de ids de modelo. Vacio si no responde."""
-    url = base_url.rstrip("/")
+    """GET {base_url}/models -> lista de ids de modelo. Vacio si no responde.
+
+    Solo se permite HTTP(S): un baseURL de un repo no confiable no debe convertir
+    el sondeo en una lectura de ficheros locales. La respuesta se limita a 1 MB.
+    """
+    if not isinstance(base_url, str) or not base_url.strip():
+        return []
+    parsed = urllib.parse.urlparse(base_url)
+    if parsed.scheme.lower() not in ("http", "https"):
+        return []
+    url = base_url.strip().rstrip("/")
     if not url.endswith("/v1"):
         url += "/v1"
     try:
         req = urllib.request.Request(f"{url}/models", headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8", "replace"))
+            raw = resp.read(MAX_PROBE_BYTES + 1)
+        if len(raw) > MAX_PROBE_BYTES:
+            return []
+        payload = json.loads(raw.decode("utf-8", "replace"))
     except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
         return []
     data = payload.get("data") if isinstance(payload, dict) else None

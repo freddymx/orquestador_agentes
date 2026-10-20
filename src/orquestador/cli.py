@@ -74,11 +74,25 @@ def _fail(message: str) -> NoReturn:
     raise typer.Exit(2)
 
 
-def _resolve_scope(scope: str | None, strategy: Strategy | None = None) -> str:
-    """Prioridad: --scope explicito > scope de la estrategia > project."""
+def _resolve_scope(
+    scope: str | None,
+    strategy: Strategy | None = None,
+    *,
+    require_explicit_global: bool = False,
+) -> str:
+    """Prioridad: --scope explicito > scope de la estrategia > project.
+
+    En `generate`, un `scope: global` que venga de un `.orquestador.yaml` del
+    proyecto no basta: escribir en ~/.config/opencode requiere --scope global.
+    """
     value = (scope or (strategy.scope if strategy else None) or "project").strip().lower()
     if value not in SCOPES:
         _fail(f"scope debe ser 'project' o 'global' (recibido: '{value}')")
+    if require_explicit_global and scope is None and value == "global":
+        _fail(
+            "La estrategia pide scope global. Pasa --scope global para confirmar "
+            "que quieres escribir en ~/.config/opencode."
+        )
     return value
 
 
@@ -462,7 +476,7 @@ def generate(
     strategy = _load_strategy_file(sf, required=strategy_file is not None)
     if not sf.exists():
         console.print(f"[dim]No hay estrategia en {sf}: se usara la seleccion automatica.[/dim]")
-    resolved_scope = _resolve_scope(scope, strategy)
+    resolved_scope = _resolve_scope(scope, strategy, require_explicit_global=True)
     if preset:
         try:
             strategy.preset = normalize_preset(preset)
@@ -620,12 +634,23 @@ def diff(
         if status != "unchanged":
             changed += 1
             if not as_json:
-                typer.echo("".join(difflib.unified_diff(
-                    current.splitlines(keepends=True),
-                    item.text.splitlines(keepends=True),
-                    fromfile=str(item.path) if exists else "/dev/null",
-                    tofile=f"{item.path} (generado)",
-                )), nl=False)
+                try:
+                    display = str(item.path.relative_to(project_dir))
+                except ValueError:
+                    display = str(item.path)
+                if item.kind in ("config-new", "config-patch"):
+                    # El diff del config puede incluir apiKey/tokens en el contexto.
+                    typer.echo(
+                        f"{display}: cambio de config (diff omitido para no "
+                        "mostrar credenciales)\n"
+                    )
+                else:
+                    typer.echo("".join(difflib.unified_diff(
+                        current.splitlines(keepends=True),
+                        item.text.splitlines(keepends=True),
+                        fromfile=display if exists else "/dev/null",
+                        tofile=f"{display} (generado)",
+                    )), nl=False)
         payload.append({"path": str(item.path), "kind": item.kind, "status": status})
 
     if as_json:
