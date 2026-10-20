@@ -106,6 +106,7 @@ orq agents             # que agentes hay y a quien puede llamar cada uno
 orq agents --show local   # imprime el prompt completo de un agente
 orq check              # valida lo generado (falla si un modelo no existe o no soporta tools)
 orq compare            # estimacion de coste frente a hacerlo todo con el modelo caro
+orq diff               # que cambiaria `orq generate`, sin escribir nada (exit 1 si hay cambios)
 orq generate --dry-run # imprime el contenido de los agentes sin escribir
 ```
 
@@ -147,9 +148,26 @@ orq init --scope global     # escribe en ~/.config/opencode/agents/
 sobrescribe a ciegas, porque ahí viven tus providers, MCP y credenciales:
 
 - Si no existe, se crea con `default_agent`.
-- Si existe y es JSON válido, se le añade `default_agent` conservando el resto.
-- Si tiene comentarios JSONC, **no se toca** y te dice qué línea añadir a mano,
-  porque reserializarlo los destruiría.
+- Si existe, se le añade o actualiza `default_agent` **editando el texto**: los
+  comentarios `//` y `/* */`, el orden de claves, tus providers y MCP se conservan
+  exactamente como estaban. No se reserializa el fichero.
+- Si el fichero no es JSONC válido, no se toca y te dice qué línea añadir a mano.
+
+Todas las escrituras son atómicas (fichero temporal + rename), así que una interrupción
+no deja agentes a medias. Para conservar la versión anterior antes de sobrescribir:
+
+```bash
+orq generate --force --backup   # deja <agente>.md.bak y opencode.jsonc.bak
+```
+
+`orq diff` usa exactamente el mismo cálculo que `orq generate` pero no escribe nada:
+imprime un diff unificado por fichero y sale con código 1 si hay diferencias (0 si está
+al día). Es la forma barata de revisar un cambio de estrategia en CI o antes de aplicar:
+
+```bash
+orq diff
+orq diff --json | jq '.files[] | select(.status != "unchanged")'
+```
 
 ### Permisos de los agentes
 
@@ -176,6 +194,7 @@ subagents:
   local:
     model: lemonade/Qwen3.8-27B-GGUF-UD-Q4_K_XL
     steps: 40
+    enabled: true
   barato:
     model: openai/gpt-6-luna
     steps: 12
@@ -185,6 +204,12 @@ subagents:
 rules:
   - "Para migraciones de base de datos, delega siempre en especialista"
 ```
+
+Cada subagente acepta `enabled: false`: no se genera su `.md`, el orquestador no lo
+ofrece como delegado y su parte del trabajo se reparte entre los que quedan (también en
+`orq compare`). Sirve, por ejemplo, para un portátil sin modelo local o para no enviar
+nada a la nube con el agente `barato`. Si el `.md` ya existía de una generación anterior,
+`orq` no lo borra por su cuenta: te avisa para que lo elimines tú.
 
 Despues: `orq generate` (sin `--force` no pisa ficheros existentes; con `--force` los rehace).
 

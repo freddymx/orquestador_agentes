@@ -1,6 +1,6 @@
 import json
 
-from orquestador.catalog import build_catalog
+from orquestador.catalog import build_catalog, strip_jsonc
 from orquestador.planner import Strategy, build_plan
 from orquestador.scan import scan_project
 from orquestador.templates import render_agent
@@ -216,11 +216,25 @@ def test_patch_default_agent_preserves_providers(tmp_path):
     assert data["$schema"].startswith("https://")
 
 
-def test_patch_default_agent_refuses_when_comments_present(tmp_path):
+def test_patch_default_agent_preserves_jsonc_comments(tmp_path):
     from orquestador.writer import patch_default_agent
 
     cfg = tmp_path / "opencode.jsonc"
-    original = '{\n  // mi config\n  "provider": {}\n}\n'
+    original = '{\n  // mi config\n  "provider": {},\n  /* bloque */\n  "mcp": {}\n}\n'
+    cfg.write_text(original, encoding="utf-8")
+    assert patch_default_agent(cfg, "orquestador") is True
+    text = cfg.read_text()
+    assert "// mi config" in text
+    assert "/* bloque */" in text
+    assert json.loads(strip_jsonc(text))["default_agent"] == "orquestador"
+    assert json.loads(strip_jsonc(text))["provider"] == {}
+
+
+def test_patch_default_agent_refuses_invalid_json(tmp_path):
+    from orquestador.writer import patch_default_agent
+
+    cfg = tmp_path / "opencode.jsonc"
+    original = '{"provider": {,}\n'
     cfg.write_text(original, encoding="utf-8")
     assert patch_default_agent(cfg, "orquestador") is False
     assert cfg.read_text() == original  # intacto

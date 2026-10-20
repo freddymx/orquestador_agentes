@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .catalog import GLOBAL_CONFIG_DIR, meta_for, strip_jsonc, tool_support
-from .planner import OrchestrationPlan, Strategy, save_strategy
+from .fsutil import atomic_write_text, backup_file
+from .planner import OrchestrationPlan, Strategy, strategy_text
 from .templates import default_agent_snippet, provider_snippet, render_agent
 
 STRATEGY_FILE = ".orquestador.yaml"
+GENERATED_AGENTS = ("orquestador", "local", "barato", "especialista")
 
 
 @dataclass
@@ -18,6 +22,13 @@ class WriteResult:
     skipped: list[Path]
     notes: list[str] = field(default_factory=list)
     strategy_path: Path | None = None
+
+
+@dataclass
+class PlannedFile:
+    path: Path
+    text: str
+    kind: str  # agent | config-new | config-patch | strategy
 
 
 def agents_dir(scope: str, project_dir: Path) -> Path:
@@ -32,30 +43,263 @@ def config_file(scope: str, project_dir: Path) -> Path:
     return project_dir / "opencode.jsonc"
 
 
-def patch_default_agent(path: Path, agent_name: str) -> bool | None:
-    """Anade default_agent a una config existente SIN perder providers/mcp.
+# --------------------------------------------------------------------------- #
+# Edicion de JSONC preservando comentarios
+# --------------------------------------------------------------------------- #
+
+
+def _read_string(text: str, start: int) -> int | None:
+    """`start` apunta a la comilla de apertura; devuelve el indice tras la de cierre."""
+    i = start + 1
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == '"':
+            return i + 1
+        i += 1
+    return None
+
+
+def _skip_ws_comments(text: str, i: int) -> int:
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in " \t\r\n":
+            i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] != "\n":
+                i += 1
+        elif ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+        else:
+            break
+    return i
+
+
+def _root_brace(text: str) -> int:
+    i = _skip_ws_comments(text, 0)
+    return i if i < len(text) and text[i] == "{" else -1
+
+
+def _raw_value_end(text: str, start: int) -> int | None:
+    i, depth = start, 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            end = _read_string(text, i)
+            if end is None:
+                return None
+            i = end
+            continue
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return i
+        i += 1
+    return i
+
+
+def _find_top_level_value(text: str, key: str) -> tuple[int, int] | None:
+    """Posicion (inicio, fin) del valor de `key` en el objeto raiz."""
+    depth, i = 0, 0
+    while i < len(text):
+        ch = text[i]
+        if ch == '"':
+            end = _read_string(text, i)
+            if end is None:
+                return None
+            if depth == 1:
+                try:
+                    name = json.loads(text[i:end])
+                except json.JSONDecodeError:
+                    name = None
+                if name == key:
+                    colon = _skip_ws_comments(text, end)
+                    if colon < len(text) and text[colon] == ":":
+                        start = _skip_ws_comments(text, colon + 1)
+                        if start < len(text) and text[start] == '"':
+                            value_end = _read_string(text, start)
+                            return (start, value_end) if value_end else None
+                        value_end = _raw_value_end(text, start)
+                        return (start, value_end) if value_end is not None else None
+            i = end
+            continue
+        if ch == "/" and i + 1 < len(text) and text[i + 1] == "/":
+            while i < len(text) and text[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < len(text) and text[i + 1] == "*":
+            i += 2
+            while i + 1 < len(text) and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        i += 1
+    return None
+
+
+def _insert_after_root(text: str, agent_name: str) -> str:
+    """Inserta la clave tras la llave raiz: no toca ni una linea del resto."""
+    open_brace = _root_brace(text)
+    if open_brace < 0:
+        raise ValueError("la raiz no es un objeto")
+
+    line_start = text.rfind("\n", 0, open_brace) + 1
+    prefix = text[line_start:open_brace]
+    root_indent = prefix if not prefix.strip() else ""
+    after = text[open_brace + 1:]
+    child_indent = root_indent + "  "
+    newline = after.find("\n")
+    if newline >= 0:
+        candidate = re.match(r"[ \t]*", after[newline + 1:])
+        if candidate and candidate.group(0):
+            child_indent = candidate.group(0)
+
+    entry = f'"default_agent": {json.dumps(agent_name, ensure_ascii=False)}'
+    next_code = _skip_ws_comments(text, open_brace + 1)
+    if next_code < len(text) and text[next_code] == "}":
+        # Objeto vacio: se inserta antes del cierre conservando comentarios/huecos.
+        gap = text[open_brace + 1:next_code]
+        newline_prefix = "" if gap.endswith(("\n", "\r\n")) else "\n"
+        return (
+            text[:next_code]
+            + newline_prefix
+            + f"{child_indent}{entry}\n{root_indent}"
+            + text[next_code:]
+        )
+
+    if after.startswith(("\n", "\r\n")):
+        insertion = f"\n{child_indent}{entry},"
+    else:
+        insertion = f"\n{child_indent}{entry},\n{child_indent}"
+    return text[: open_brace + 1] + insertion + after
+
+
+def patched_config_text(raw: str, agent_name: str) -> str:
+    """Devuelve la config con `default_agent` puesto, conservando comentarios.
+
+    Lanza ValueError si el fichero no es JSONC valido o no se puede editar con
+    seguridad. Nunca reserializa el documento entero.
+    """
+    try:
+        data = json.loads(strip_jsonc(raw))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON invalido: {exc}") from None
+    if not isinstance(data, dict):
+        raise ValueError("la raiz no es un objeto")
+    if data.get("default_agent") == agent_name:
+        return raw
+
+    if "default_agent" in data:
+        span = _find_top_level_value(raw, "default_agent")
+        if span is None:
+            raise ValueError("no se pudo localizar 'default_agent' en el texto")
+        start, end = span
+        new = raw[:start] + json.dumps(agent_name, ensure_ascii=False) + raw[end:]
+    else:
+        new = _insert_after_root(raw, agent_name)
+
+    try:
+        json.loads(strip_jsonc(new))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"el resultado no seria JSON valido: {exc}") from None
+    return new
+
+
+def patch_default_agent(path: Path, agent_name: str, backup: bool = False) -> bool | None:
+    """Anade o actualiza `default_agent` sin perder providers, mcp ni comentarios.
 
     Devuelve True si escribe, None si ya estaba configurado y False si no se puede
-    tocar (comentarios JSONC o JSON invalido): reserializarlo destruiria el original.
+    tocar (JSON invalido, raiz que no es objeto...).
     """
-    import json
-
     raw = path.read_text(encoding="utf-8")
-    if strip_jsonc(raw) != raw:
-        return False
     try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
+        new = patched_config_text(raw, agent_name)
+    except ValueError:
         return False
-    if not isinstance(data, dict):
-        return False
-    if data.get("default_agent") == agent_name:
+    if new == raw:
         return None
-    data["default_agent"] = agent_name
-    ordered = {"$schema": data.pop("$schema")} if "$schema" in data else {}
-    ordered.update(data)
-    path.write_text(json.dumps(ordered, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if backup:
+        backup_file(path)
+    atomic_write_text(path, new)
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Plan de escritura (compartido por generate y diff)
+# --------------------------------------------------------------------------- #
+
+
+def planned_files(
+    plan: OrchestrationPlan,
+    project_dir: Path,
+    scope: str = "project",
+    set_default_agent: bool = True,
+    write_strategy: bool = True,
+) -> tuple[list[PlannedFile], list[str]]:
+    """Ficheros que escribiria `write_plan`, sin tocar el disco.
+
+    Devuelve tambien las notas que no son ficheros (por ejemplo, una config que no
+    se puede editar y hay que tocar a mano).
+    """
+    plan.strategy.scope = scope
+    target_dir = agents_dir(scope, project_dir)
+    files = [
+        PlannedFile(target_dir / f"{agent.name}.md", render_agent(plan, agent), "agent")
+        for agent in plan.agents
+    ]
+    notes: list[str] = []
+
+    if target_dir.is_dir():
+        planned_names = {agent.name for agent in plan.agents}
+        for path in sorted(target_dir.glob("*.md")):
+            if path.stem in GENERATED_AGENTS and path.stem not in planned_names:
+                notes.append(
+                    f"{path.name} sigue en disco pero ya no esta en el plan "
+                    "(enabled: false). Borralo si quieres desactivarlo del todo."
+                )
+
+    if set_default_agent and plan.strategy.default_agent:
+        primary = plan.orchestrator
+        if primary is None:
+            notes.append("No hay agente orquestador: no se toca default_agent.")
+        else:
+            cfg = config_file(scope, project_dir)
+            if not cfg.exists():
+                files.append(PlannedFile(cfg, default_agent_snippet(primary.name), "config-new"))
+            else:
+                try:
+                    raw = cfg.read_text(encoding="utf-8")
+                    new = patched_config_text(raw, primary.name)
+                except (OSError, ValueError):
+                    new = None
+                if new is None:
+                    notes.append(
+                        f"{cfg.name} no es JSONC valido: no se toca para no perderlo.\n"
+                        f"  Anade a mano   \"default_agent\": \"{primary.name}\""
+                    )
+                elif new != raw:
+                    files.append(PlannedFile(cfg, new, "config-patch"))
+
+    if write_strategy:
+        files.append(PlannedFile(
+            project_dir / STRATEGY_FILE, strategy_text(plan.strategy, plan.project), "strategy"
+        ))
+    return files, notes
 
 
 def write_plan(
@@ -65,45 +309,32 @@ def write_plan(
     force: bool = False,
     set_default_agent: bool = True,
     write_strategy: bool = True,
+    backup: bool = False,
 ) -> WriteResult:
     target_dir = agents_dir(scope, project_dir)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    # La estrategia guardada debe decir donde se escribio de verdad: si no, el
-    # siguiente `orq generate` sin --scope escribe en el sitio equivocado.
-    plan.strategy.scope = scope
+    files, notes = planned_files(plan, project_dir, scope, set_default_agent, write_strategy)
 
     written: list[Path] = []
     skipped: list[Path] = []
-    notes: list[str] = []
+    strategy_path: Path | None = None
+    if any(item.kind == "agent" for item in files):
+        target_dir.mkdir(parents=True, exist_ok=True)
 
-    for agent in plan.agents:
-        path = target_dir / f"{agent.name}.md"
-        if path.exists() and not force:
-            skipped.append(path)
+    for item in files:
+        if item.kind == "agent" and item.path.exists() and not force:
+            skipped.append(item.path)
             continue
-        path.write_text(render_agent(plan, agent), encoding="utf-8")
-        written.append(path)
-
-    # El opencode.jsonc del usuario NUNCA se sobrescribe a ciegas: contiene sus
-    # providers, mcp y claves. --force aplica a los agentes, no a la config.
-    cfg = config_file(scope, project_dir)
-    if set_default_agent and plan.strategy.default_agent:
-        primary = plan.orchestrator
-        if not primary:
-            notes.append("No hay agente orquestador: no se toca default_agent.")
-        elif not cfg.exists():
-            cfg.write_text(default_agent_snippet(primary.name), encoding="utf-8")
-            written.append(cfg)
-        else:
-            patched = patch_default_agent(cfg, primary.name)
-            if patched:
-                written.append(cfg)
-                notes.append(f"{cfg.name}: anadido \"default_agent\": \"{primary.name}\" conservando el resto.")
-            elif patched is False:
-                notes.append(
-                    f"{cfg.name} ya existe y tiene comentarios: no se toca para no perderlos.\n"
-                    f"  Anade a mano   \"default_agent\": \"{primary.name}\""
-                )
+        if backup:
+            backup_file(item.path)
+        atomic_write_text(item.path, item.text)
+        written.append(item.path)
+        if item.kind == "strategy":
+            strategy_path = item.path
+        elif item.kind == "config-patch":
+            notes.append(
+                f"{item.path.name}: anadido \"default_agent\": \"{plan.orchestrator.name}\" "
+                "conservando el resto."
+            )
 
     for patch in plan.provider_patches:
         notes.append(
@@ -111,18 +342,12 @@ def write_plan(
             f"  {patch['provider']}: {provider_snippet(patch)}"
         )
 
-    strategy_path: Path | None = None
-    if write_strategy:
-        strategy_path = project_dir / STRATEGY_FILE
-        save_strategy(strategy_path, plan.strategy, plan.project)
-        written.append(strategy_path)
-
     return WriteResult(files=written, skipped=skipped, strategy_path=strategy_path, notes=notes)
 
 
 def write_minimal_config(project_dir: Path, agent_name: str) -> Path:
     path = project_dir / "opencode.jsonc"
-    path.write_text(default_agent_snippet(agent_name), encoding="utf-8")
+    atomic_write_text(path, default_agent_snippet(agent_name))
     return path
 
 
@@ -257,7 +482,7 @@ def validate(
     if cfg.exists() and "default_agent" not in cfg.read_text(encoding="utf-8"):
         problems.append(("warn", f"{cfg.name}: no define 'default_agent'"))
 
-    if strategy is not None and strategy.local_model and catalog is not None:
+    if strategy is not None and strategy.add_local and strategy.local_model and catalog is not None:
         provider_name = strategy.local_model.split("/", 1)[0]
         provider = catalog.providers.get(provider_name)
         if provider is not None and not provider.is_local:

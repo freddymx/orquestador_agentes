@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 from typing import NoReturn
 
@@ -22,7 +23,16 @@ from .planner import (
     tier_of,
 )
 from .scan import scan_project
-from .writer import STRATEGY_FILE, agents_dir, parse_agent_file, permission_rules, validate, write_plan
+from .writer import (
+    STRATEGY_FILE,
+    agents_dir,
+    parse_agent_file,
+    permission_rules,
+    planned_files,
+    validate,
+    write_plan,
+)
+
 
 def _version_callback(value: bool) -> None:
     from . import __version__
@@ -255,6 +265,7 @@ def init(
     scope: str = typer.Option(None, "--scope", help="project | global (por defecto: project)"),
     probe: bool = typer.Option(True, "--probe/--no-probe", help="Sondear endpoints locales"),
     force: bool = typer.Option(False, "--force", help="Sobrescribir agentes existentes"),
+    backup: bool = typer.Option(False, "--backup", help="Guardar .bak antes de sobrescribir"),
 ):
     """Genera el orquestador de forma guiada."""
     project_dir = _resolve_dir(directory)
@@ -295,7 +306,7 @@ def init(
         console.print("[yellow]Cancelado. No se ha escrito nada.[/yellow]")
         raise typer.Exit(0)
 
-    result = write_plan(plan, project_dir, scope=resolved_scope, force=force)
+    result = write_plan(plan, project_dir, scope=resolved_scope, force=force, backup=backup)
     _report(result)
     raise typer.Exit(0)
 
@@ -401,6 +412,7 @@ def generate(
     cheap_model: str = typer.Option(None, "--cheap-model"),
     local_model: str = typer.Option(None, "--local-model"),
     force: bool = typer.Option(False, "--force", help="Sobrescribir agentes existentes (nunca la config)"),
+    backup: bool = typer.Option(False, "--backup", help="Guardar .bak antes de sobrescribir"),
     probe: bool = typer.Option(True, "--probe/--no-probe", help="Sondear endpoints locales"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Muestra el contenido sin escribir"),
     as_json: bool = typer.Option(False, "--json", help="Salida JSON (con --dry-run incluye el contenido)"),
@@ -464,7 +476,7 @@ def generate(
             console.print(render_agent(plan, agent))
         raise typer.Exit(0)
 
-    result = write_plan(plan, project_dir, scope=resolved_scope, force=force)
+    result = write_plan(plan, project_dir, scope=resolved_scope, force=force, backup=backup)
     _report(result)
 
     problems = validate(project_dir, scope=resolved_scope, catalog=catalog, strategy=plan.strategy)
@@ -506,6 +518,69 @@ def check(
         colour = "red" if level == "error" else "yellow"
         console.print(f"[{colour}]{level.upper()}[/{colour}] {message}")
     raise typer.Exit(1 if any(level == "error" for level, _ in problems) else 0)
+
+
+# --------------------------------------------------------------------------- #
+# diff
+# --------------------------------------------------------------------------- #
+
+
+@app.command()
+def diff(
+    directory: str = typer.Option(".", "--dir", "-d"),
+    strategy_file: Path = typer.Option(None, "--strategy", "-s"),
+    scope: str = typer.Option(None, "--scope", help="project | global (por defecto: el de la estrategia)"),
+    as_json: bool = typer.Option(False, "--json"),
+):
+    """Muestra que cambiaria `orq generate`, sin escribir nada.
+
+    Sale con 0 si todo esta al dia y con 1 si hay diferencias (como `diff`).
+    """
+    project_dir = _resolve_dir(directory)
+    sf = _strategy_path(project_dir, strategy_file)
+    strategy = _load_strategy_file(sf, required=strategy_file is not None)
+    resolved_scope = _resolve_scope(scope, strategy)
+    profile, catalog, _ = _load_context(project_dir, False, None, 0.0)
+    plan = build_plan(profile, catalog, strategy)
+    files, notes = planned_files(plan, project_dir, resolved_scope)
+
+    payload = []
+    changed = 0
+    for item in files:
+        exists = item.path.exists()
+        current = item.path.read_text(encoding="utf-8") if exists else ""
+        if current == item.text:
+            status = "unchanged"
+        elif not exists:
+            status = "added"
+        else:
+            status = "modified"
+        if status != "unchanged":
+            changed += 1
+            if not as_json:
+                typer.echo("".join(difflib.unified_diff(
+                    current.splitlines(keepends=True),
+                    item.text.splitlines(keepends=True),
+                    fromfile=str(item.path) if exists else "/dev/null",
+                    tofile=f"{item.path} (generado)",
+                )), nl=False)
+        payload.append({"path": str(item.path), "kind": item.kind, "status": status})
+
+    if as_json:
+        console.print_json(data={
+            "ok": changed == 0,
+            "differences": changed,
+            "files": payload,
+            "notes": notes,
+        })
+    else:
+        for note in notes:
+            console.print(f"[yellow]{note}[/yellow]")
+        if changed == 0:
+            console.print("[green]Sin diferencias: lo generado esta al dia.[/green]")
+        else:
+            console.print(f"[dim]{changed} fichero(s) cambiarian. Ejecuta orq generate para aplicarlo.[/dim]")
+    raise typer.Exit(0 if changed == 0 else 1)
 
 
 # --------------------------------------------------------------------------- #

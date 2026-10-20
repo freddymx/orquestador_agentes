@@ -20,6 +20,7 @@ from pathlib import Path
 import yaml
 
 from .catalog import Catalog, ModelInfo, guess_tier, meta_for
+from .fsutil import atomic_write_text, backup_file
 from .scan import ProjectProfile
 
 TIER_LABELS = {"frontier": "frontera", "cheap": "barato", "local": "local"}
@@ -41,6 +42,8 @@ class Strategy:
     local_model: str | None = None
     cheap_model: str | None = None
     specialist_model: str | None = None
+    add_local: bool = True
+    add_cheap: bool = True
     add_specialist: bool = True
     local_steps: int = 40
     cheap_steps: int = 12
@@ -110,6 +113,15 @@ def _rules(value) -> list[str]:
     return []
 
 
+def _enabled(value, default: bool = True) -> bool:
+    """`enabled: false` desactiva un subagente; ausente o true lo mantiene."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("false", "no", "off", "0")
+
+
 def strategy_from_mapping(data: dict) -> Strategy:
     strategy = Strategy()
     if not isinstance(data, dict):
@@ -127,15 +139,17 @@ def strategy_from_mapping(data: dict) -> Strategy:
         if isinstance(local, dict):
             strategy.local_model = _clean(local.get("model"))
             strategy.local_steps = _steps(local.get("steps"), strategy.local_steps, "subagents.local")
+            strategy.add_local = _enabled(local.get("enabled"), strategy.add_local)
         if isinstance(cheap, dict):
             strategy.cheap_model = _clean(cheap.get("model"))
             strategy.cheap_steps = _steps(cheap.get("steps"), strategy.cheap_steps, "subagents.barato")
+            strategy.add_cheap = _enabled(cheap.get("enabled"), strategy.add_cheap)
         if isinstance(spec, dict):
             strategy.specialist_model = _clean(spec.get("model"))
             strategy.specialist_steps = _steps(
                 spec.get("steps"), strategy.specialist_steps, "subagents.especialista"
             )
-            strategy.add_specialist = bool(spec.get("enabled", strategy.add_specialist))
+            strategy.add_specialist = _enabled(spec.get("enabled"), strategy.add_specialist)
     return strategy
 
 
@@ -146,7 +160,8 @@ def _yaml_string(text: str) -> str:
     return json.dumps(text, ensure_ascii=False)
 
 
-def save_strategy(path: Path, strategy: Strategy, project: str) -> str:
+def strategy_text(strategy: Strategy, project: str) -> str:
+    """Contenido exacto de `.orquestador.yaml` (sin tocar disco)."""
     safe_project = " ".join(str(project).splitlines())
     lines = [
         f"# Estrategia generada por orquestador para: {safe_project}",
@@ -157,20 +172,28 @@ def save_strategy(path: Path, strategy: Strategy, project: str) -> str:
         f"scope: {strategy.scope}",
         "subagents:",
     ]
-    for name, model, steps in (
-        ("local", strategy.local_model, strategy.local_steps),
-        ("barato", strategy.cheap_model, strategy.cheap_steps),
-        ("especialista", strategy.specialist_model, strategy.specialist_steps),
+    for name, model, steps, enabled in (
+        ("local", strategy.local_model, strategy.local_steps, strategy.add_local),
+        ("barato", strategy.cheap_model, strategy.cheap_steps, strategy.add_cheap),
+        ("especialista", strategy.specialist_model, strategy.specialist_steps, strategy.add_specialist),
     ):
         lines.append(f"  {name}:")
         lines.append(f"    model: {model or 'auto'}")
         lines.append(f"    steps: {steps}")
+        if not enabled:
+            lines.append("    enabled: false")
     if strategy.extra_rules:
         lines.append("rules:")
         for rule in strategy.extra_rules:
             lines.append(f"  - {_yaml_string(rule)}")
-    text = "\n".join(lines) + "\n"
-    path.write_text(text, encoding="utf-8")
+    return "\n".join(lines) + "\n"
+
+
+def save_strategy(path: Path, strategy: Strategy, project: str, backup: bool = False) -> str:
+    text = strategy_text(strategy, project)
+    if backup:
+        backup_file(path)
+    atomic_write_text(path, text)
     return text
 
 
@@ -364,7 +387,9 @@ def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | N
         )
     )
 
-    if strategy.local_model:
+    if not strategy.add_local:
+        notes.append("Agente local desactivado en la estrategia.")
+    elif strategy.local_model:
         agents.append(
             AgentPlan(
                 name="local",
@@ -379,7 +404,9 @@ def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | N
     else:
         notes.append("Se omite el agente local: no hay modelos locales configurados.")
 
-    if strategy.cheap_model:
+    if not strategy.add_cheap:
+        notes.append("Agente barato desactivado en la estrategia.")
+    elif strategy.cheap_model:
         agents.append(
             AgentPlan(
                 name="barato",
@@ -421,6 +448,8 @@ def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | N
 def provider_patches(catalog: Catalog, strategy: Strategy) -> list[dict]:
     """Bloques de provider listos para pegar en opencode.jsonc si faltan."""
     patches: list[dict] = []
+    if not strategy.add_local:
+        return patches
     for agent_model in (strategy.local_model,):
         if not agent_model:
             continue

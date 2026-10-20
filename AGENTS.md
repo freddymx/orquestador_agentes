@@ -8,7 +8,7 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
 
 - `uv sync` — the only dependency entrypoint. `src/` layout + hatchling means
   `import orquestador` works inside the uv env, not from a bare `python`.
-- `uv run pytest` — full suite (~0.3s, 98 tests). One test:
+- `uv run pytest` — full suite (~0.3s, 120 tests). One test:
   `uv run pytest tests/test_generate.py::test_force_never_clobbers_existing_config`.
   `tests/conftest.py` points `ORQ_MODELS_CACHE` at a missing file: tests must not depend on
   the machine's models.dev cache. Use the `models_cache` fixture to inject fake metadata.
@@ -27,16 +27,28 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
   `tool_call`, context, price and variants, assigns a tier.
 - `planner.py` — `Strategy` (from `.orquestador.yaml`) → `auto_strategy` → `build_plan`.
 - `templates.py` — agent markdown, YAML frontmatter, prompts (one renderer per agent name).
-- `writer.py` — writes agents, patches config, `validate()`.
+- `writer.py` — `planned_files`, JSONC-safe `default_agent` patch, agent/strategy writes,
+  `validate()`.
+- `fsutil.py` — `atomic_write_text` and `backup_file`; every generated file goes through it.
 - `cli.py` — Typer commands and all console output; `cost.py` — cost estimates.
 
 ## Invariants tests enforce
 
-- `opencode.jsonc` is never re-serialized when it contains JSONC comments: `patch_default_agent`
-  returns `False` and the CLI prints the line to add by hand. It returns `None` when
-  `default_agent` is already set (nothing to do) and `True` only when it wrote. `--force`
-  rewrites only agent `.md` files. A named regression test covers this — do not "simplify"
-  it away.
+- `opencode.jsonc` is **edited textually, never re-serialized**: `patched_config_text` parses
+  it with `strip_jsonc` only to validate, then inserts or replaces `default_agent` in the raw
+  text so comments, providers and MCP keys survive byte-for-byte. `patch_default_agent`
+  returns `True` when it wrote, `None` when the value was already set and `False` only when
+  the file is not valid JSONC (untouched). A named regression test covers comments; do not
+  "simplify" this back to `json.dumps`.
+- Every write goes through `fsutil.atomic_write_text` (temp file in the same directory +
+  `os.replace`), so a crash cannot leave a half-written agent or config. `--backup` copies the
+  previous version to `<name>.bak` before overwriting; it is opt-in and never creates backups
+  when the file does not exist.
+- `orq diff` renders the same `planned_files` as `write_plan` without touching disk, prints a
+  unified diff and exits `1` when something would change (`0` when up to date). Keep both
+  paths backed by `planned_files` so diff cannot drift from generate.
+- `--force` rewrites only agent `.md` files. A named regression test covers this — do not
+  "simplify" it away.
 - Permissions serialize as `permissions: [{action, resource, effect}]` and evaluation is
   *last rule wins* (`effective_permissions`). Tests assert the literal
   `  - action: edit` / `    resource: "*"` / `    effect: deny` shape: keep indentation and
@@ -47,6 +59,10 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
   require it. `default_agent` goes in `opencode.jsonc`, never in an agent file.
 - Every agent denies `external_directory: "*"` and `read`/`edit` on `profile.secret_paths`.
   `local` also denies network shell patterns. Keep this policy when adding a renderer.
+- `subagents.*.enabled: false` drops that agent from the plan (and its delegation allow-list);
+  `generate` never deletes an existing `.md` for it, it only warns. Disabling is a plan-level
+  decision, not a destructive clean-up. `enabled` accepts `true/false` and the string forms
+  `"false"`/`"no"`/`"off"`/`"0"`.
 - Model refs are `provider/model` with optional `#variant`; helpers strip the variant when
   resolving. `Catalog.find` accepts the full ref or the bare model id.
 - `orchestrator_variant: auto` (the default) applies `high` only when models.dev declares it;
@@ -72,9 +88,11 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
   `especialista`.
 - `.orquestador.yaml` is the regeneration contract:
   `orchestrator_model`, `orchestrator_variant`, `scope`, `default_agent`,
-  `subagents.{local,barato,especialista}.{model,steps}`, `rules`. `auto`/`null`/`-` mean
-  auto; `none` means "no variant". `steps` must be a positive integer (`StrategyError`
-  otherwise, surfaced by the CLI as exit code 2). `rules` accepts a string or a list.
+  `subagents.{local,barato,especialista}.{model,steps,enabled}`, `rules`. `auto`/`null`/`-`
+  mean auto; `none` means "no variant". `enabled: false` drops that subagent from the plan
+  (its cost share is redistributed); `true`/absent keeps it. `steps` must be a positive
+  integer (`StrategyError` otherwise, surfaced by the CLI as exit code 2). `rules` accepts a
+  string or a list.
 
 ## Gotchas
 
