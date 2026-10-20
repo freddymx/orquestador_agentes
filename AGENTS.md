@@ -8,7 +8,7 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
 
 - `uv sync` — the only dependency entrypoint. `src/` layout + hatchling means
   `import orquestador` works inside the uv env, not from a bare `python`.
-- `uv run pytest` — full suite (~0.4s, 144 tests). One test:
+- `uv run pytest` — full suite (~0.6s, 181 tests). One test:
   `uv run pytest tests/test_generate.py::test_force_never_clobbers_existing_config`.
   `tests/conftest.py` points `ORQ_MODELS_CACHE` at a missing file: tests must not depend on
   the machine's models.dev cache. Use the `models_cache` fixture to inject fake metadata.
@@ -28,8 +28,10 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
 - `catalog.py` — merges project + `~/.config/opencode` configs, probes OpenAI-compatible
   `/v1/models`, reads OpenCode's models.dev cache (`~/.cache/opencode/models.json`) for
   `tool_call`, context, price and variants, assigns a tier.
-- `planner.py` — `Strategy` (from `.orquestador.yaml`) → `auto_strategy` → `build_plan`.
-- `templates.py` — agent markdown, YAML frontmatter, prompts (one renderer per agent name).
+- `planner.py` — `Strategy` (from `.orquestador.yaml`) → `auto_strategy` → `build_plan`;
+  includes hierarchy presets and `CustomAgent` validation/resolution.
+- `templates.py` — agent markdown, YAML frontmatter, prompts (one renderer per fixed agent
+  plus a safe generic renderer for custom agents).
 - `writer.py` — `planned_files`, JSONC-safe `default_agent` patch, agent/strategy writes,
   `validate()`.
 - `fsutil.py` — `atomic_write_text` and `backup_file`; every generated file goes through it.
@@ -66,6 +68,25 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
   `generate` never deletes an existing `.md` for it, it only warns. Disabling is a plan-level
   decision, not a destructive clean-up. `enabled` accepts `true/false` and the string forms
   `"false"`/`"no"`/`"off"`/`"0"`.
+- `preset` is `balanced` (default), `lean` or `strict`; `auto`/`default`/empty map to
+  `balanced`. `lean` keeps exactly one worker, chosen by `local` > `barato` > `especialista`
+  among enabled roles, and omits custom agents. Apply lean at plan time; never mutate the
+  saved `enabled` flags, so switching back to `balanced` restores the full team.
+- `validate(planned_names=...)` treats known generated files outside the plan (lean, disabled)
+  as stale warnings, not as "orchestrator cannot delegate" errors. `generate` passes
+  `report_stale=False` because `planned_files` already prints those notes.
+- `preset: strict` denies `shell` on every subagent, turns cloud edits into `ask`
+  (`barato`, `especialista`, custom `edit`/`full`) and denies `webfetch`/`websearch` to the
+  orchestrator. The local agent keeps `edit: allow` (it is the private worker).
+- Custom agents live under `subagents.<name>` (not `local`/`barato`/`especialista`), match
+  `^[a-z][a-z0-9_-]{0,39}$`, are unique after lowercasing and cannot use reserved names.
+  Fields: `model`, `steps`, `enabled`, `tier` (`local|cheap|frontier`), `permissions`
+  (`read|edit|full`), `description`, `prompt`, `color` (`#rrggbb`). Invalid values raise
+  `StrategyError` (CLI exit 2). `model: auto` resolves by tier; custom agents are routed and
+  added to the orchestrator delegation allow-list, with the same external/secret/subagent
+  denials as fixed agents. An explicit `tier` is never silently swapped: `tier: local` with
+  no local model skips the agent instead of sending it to the cloud. Only tierless auto may
+  fall back `cheap` → `frontier` → `local`.
 - `scan` keeps `runtimes` and `frameworks` separate: `node`/`python`/`php` are runtimes, not
   frameworks. A framework needs evidence in the manifest (`laravel/framework`, `next`,
   `fastapi`, `gin`...); a bare `composer.json` is not Laravel. Docker and CI are `signals`,
@@ -99,12 +120,13 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
   (`orchestrator_model`), though the loader tolerates `orquestador_model`, `specialist`,
   `especialista`.
 - `.orquestador.yaml` is the regeneration contract:
-  `orchestrator_model`, `orchestrator_variant`, `scope`, `default_agent`,
-  `subagents.{local,barato,especialista}.{model,steps,enabled}`, `rules`. `auto`/`null`/`-`
+  `preset`, `orchestrator_model`, `orchestrator_variant`, `scope`, `default_agent`,
+  `subagents.<fixed|custom>.{model,steps,enabled,...}`, `rules`. `auto`/`null`/`-`
   mean auto; `none` means "no variant". `enabled: false` drops that subagent from the plan
   (its cost share is redistributed); `true`/absent keeps it. `steps` must be a positive
   integer (`StrategyError` otherwise, surfaced by the CLI as exit code 2). `rules` accepts a
-  string or a list.
+  string or a list. `strategy_text` must round-trip custom `description`/`prompt` (JSON-style
+  double quotes) and quote `color` (`#abcdef` would otherwise be a YAML comment).
 
 ## Gotchas
 
@@ -120,5 +142,7 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
   `requests`.
 - Shell resource matching is raw text with wildcards, not a sandbox: `curl *` does not match
   `cd x && curl`. Treat those rules as guardrails in docs and prompts, never as isolation.
+- In YAML, an unquoted `*` is an alias and `#abcdef` starts a comment. Quote wildcard
+  resources (`resource: "*"`) and custom `color` values; tests parse generated YAML.
 - Running `orq init` / `orq generate` inside this repo writes real `.opencode/agents/*` and
   `.orquestador.yaml` here. Use `tmp_path` or a scratch directory instead.

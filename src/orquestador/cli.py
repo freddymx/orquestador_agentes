@@ -20,6 +20,7 @@ from .planner import (
     auto_strategy,
     build_plan,
     load_strategy,
+    normalize_preset,
     tier_of,
 )
 from .scan import scan_project
@@ -264,6 +265,7 @@ def models(
 def init(
     directory: str = typer.Option(".", "--dir", "-d", help="Proyecto a orquestar"),
     scope: str = typer.Option(None, "--scope", help="project | global (por defecto: project)"),
+    preset: str = typer.Option(None, "--preset", help="balanced | lean | strict"),
     probe: bool = typer.Option(True, "--probe/--no-probe", help="Sondear endpoints locales"),
     force: bool = typer.Option(False, "--force", help="Sobrescribir agentes existentes"),
     backup: bool = typer.Option(False, "--backup", help="Guardar .bak antes de sobrescribir"),
@@ -272,6 +274,11 @@ def init(
     project_dir = _resolve_dir(directory)
     profile, catalog, _ = _load_context(project_dir, probe, None, 2.0)
     strategy, notes = auto_strategy(catalog, profile)
+    if preset:
+        try:
+            strategy.preset = normalize_preset(preset)
+        except StrategyError as exc:
+            _fail(str(exc))
     resolved_scope = _resolve_scope(scope, strategy)
 
     console.print(Panel(
@@ -286,6 +293,10 @@ def init(
     console.print("\n[bold]Seleccion propuesta[/bold]")
     for note in notes:
         console.print(f"  · {note}")
+    if preset is None:
+        strategy.preset = _ask_preset(strategy.preset)
+    else:
+        console.print(f"  · Preset: {strategy.preset}")
 
     if catalog.models:
         _ask_models(strategy, catalog)
@@ -297,8 +308,18 @@ def init(
     strategy.default_agent = typer.confirm(
         "Poner el orquestador como agente por defecto (default_agent)?", default=True
     )
-    strategy.add_specialist = typer.confirm(
-        "Generar tambien el agente 'especialista' (frontera, puede editar)?", default=True
+    if strategy.preset == "lean":
+        console.print(
+            "[dim]Preset lean: un solo trabajador (local > barato > especialista). "
+            "Los roles personalizados no se generan.[/dim]"
+        )
+    else:
+        strategy.add_specialist = typer.confirm(
+            "Generar tambien el agente 'especialista' (frontera, puede editar)?", default=True
+        )
+    console.print(
+        "[dim]Roles extra: edita .orquestador.yaml y anade subagents.<nombre> con "
+        "model, steps, description, prompt y permissions.[/dim]"
     )
 
     plan = build_plan(profile, catalog, strategy)
@@ -310,6 +331,21 @@ def init(
     result = write_plan(plan, project_dir, scope=resolved_scope, force=force, backup=backup)
     _report(result)
     raise typer.Exit(0)
+
+
+def _ask_preset(current: str = "balanced") -> str:
+    console.print(
+        "[bold]Preset de jerarquia[/bold]\n"
+        "  balanced: orquestador + local/barato/especialista (recomendado).\n"
+        "  lean    : orquestador + un solo trabajador (local > barato > especialista).\n"
+        "  strict  : como balanced, pero sin shell en subagentes y ediciones cloud con confirmacion."
+    )
+    while True:
+        raw = typer.prompt("Preset (balanced/lean/strict)", default=current)
+        try:
+            return normalize_preset(raw)
+        except StrategyError as exc:
+            console.print(f"[red]{exc}[/red]")
 
 
 def _ask_models(strategy: Strategy, catalog) -> None:
@@ -412,6 +448,7 @@ def generate(
     orchestrator_model: str = typer.Option(None, "--orchestrator-model"),
     cheap_model: str = typer.Option(None, "--cheap-model"),
     local_model: str = typer.Option(None, "--local-model"),
+    preset: str = typer.Option(None, "--preset", help="balanced | lean | strict"),
     force: bool = typer.Option(False, "--force", help="Sobrescribir agentes existentes (nunca la config)"),
     backup: bool = typer.Option(False, "--backup", help="Guardar .bak antes de sobrescribir"),
     probe: bool = typer.Option(True, "--probe/--no-probe", help="Sondear endpoints locales"),
@@ -426,6 +463,11 @@ def generate(
     if not sf.exists():
         console.print(f"[dim]No hay estrategia en {sf}: se usara la seleccion automatica.[/dim]")
     resolved_scope = _resolve_scope(scope, strategy)
+    if preset:
+        try:
+            strategy.preset = normalize_preset(preset)
+        except StrategyError as exc:
+            _fail(str(exc))
 
     for attr, value in (
         ("orchestrator_model", orchestrator_model),
@@ -445,6 +487,7 @@ def generate(
 
         console.print_json(data={
             "project": plan.project,
+            "preset": plan.strategy.preset,
             "notes": plan.notes,
             "provider_patches": plan.provider_patches,
             "agents": [
@@ -480,7 +523,15 @@ def generate(
     result = write_plan(plan, project_dir, scope=resolved_scope, force=force, backup=backup)
     _report(result)
 
-    problems = validate(project_dir, scope=resolved_scope, catalog=catalog, strategy=plan.strategy)
+    problems = validate(
+        project_dir,
+        scope=resolved_scope,
+        catalog=catalog,
+        strategy=plan.strategy,
+        profile=profile,
+        planned_names={agent.name for agent in plan.agents},
+        report_stale=False,
+    )
     for level, message in problems:
         console.print(f"[{'red' if level == 'error' else 'yellow'}]{level}[/] {message}")
     raise typer.Exit(1 if any(level == "error" for level, _ in problems) else 0)
@@ -504,8 +555,18 @@ def check(
     resolved_scope = _resolve_scope(scope, strategy)
     config, sources = merge_configs(project_dir)
     catalog = build_catalog(config, sources, project_dir, probe=probe, timeout=1.5)
+    profile = scan_project(project_dir)
+    plan = build_plan(profile, catalog, strategy)
+    planned_names = {agent.name for agent in plan.agents}
 
-    problems = validate(project_dir, scope=resolved_scope, catalog=catalog, strategy=strategy)
+    problems = validate(
+        project_dir,
+        scope=resolved_scope,
+        catalog=catalog,
+        strategy=strategy,
+        profile=profile,
+        planned_names=planned_names,
+    )
     if as_json:
         console.print_json(data={
             "ok": not any(level == "error" for level, _ in problems),
@@ -595,6 +656,7 @@ def compare(
     strategy_file: Path = typer.Option(None, "--strategy", "-s"),
     sessions: int = typer.Option(1, "--sessions", "-n", help="Sesiones a estimar"),
     tokens: int = typer.Option(None, "--tokens", help="Tokens por sesion (por defecto 100000)"),
+    preset: str = typer.Option(None, "--preset", help="balanced | lean | strict"),
     probe: bool = typer.Option(True, "--probe/--no-probe", help="Sondear endpoints locales"),
     local_share: float = typer.Option(None, "--local-share", help="%% del trabajo que va a local (0-1)"),
     cheap_share: float = typer.Option(None, "--cheap-share"),
@@ -609,6 +671,11 @@ def compare(
     project_dir = _resolve_dir(directory)
     sf = _strategy_path(project_dir, strategy_file)
     strategy = _load_strategy_file(sf, required=strategy_file is not None)
+    if preset:
+        try:
+            strategy.preset = normalize_preset(preset)
+        except StrategyError as exc:
+            _fail(str(exc))
     profile, catalog, _ = _load_context(project_dir, probe, None, 2.0)
     plan = build_plan(profile, catalog, strategy)
 
@@ -767,7 +834,7 @@ def agents(
 
 
 def _preview(plan) -> None:
-    table = Table(title="Plan de agentes", header_style="dim")
+    table = Table(title=f"Plan de agentes (preset: {plan.strategy.preset})", header_style="dim")
     table.add_column("agente")
     table.add_column("modo")
     table.add_column("modelo")

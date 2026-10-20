@@ -14,6 +14,7 @@ Fichero de estrategia (opcional) con extension .orquestador.yaml en el proyecto:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +25,11 @@ from .fsutil import atomic_write_text, backup_file
 from .scan import ProjectProfile
 
 TIER_LABELS = {"frontier": "frontera", "cheap": "barato", "local": "local"}
+PRESETS = ("balanced", "lean", "strict")
+CUSTOM_TIERS = ("local", "cheap", "frontier")
+CUSTOM_PERMISSIONS = ("read", "edit", "full")
+RESERVED_AGENTS = {"orquestador", "local", "barato", "especialista", "specialist"}
+AGENT_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
 
 
 class StrategyError(ValueError):
@@ -33,6 +39,21 @@ class StrategyError(ValueError):
 # --------------------------------------------------------------------------- #
 # Opciones de configuracion
 # --------------------------------------------------------------------------- #
+
+
+@dataclass
+class CustomAgent:
+    """Subagente definido por el usuario, ademas de los tres roles fijos."""
+
+    name: str
+    model: str | None = None  # None / auto: se elige por tier
+    steps: int = 20
+    enabled: bool = True
+    tier: str | None = None  # local | cheap | frontier; si falta se deduce
+    permissions: str = "edit"  # read | edit | full
+    description: str = ""
+    prompt: str = ""
+    color: str = "#9d7bff"
 
 
 @dataclass
@@ -48,6 +69,8 @@ class Strategy:
     local_steps: int = 40
     cheap_steps: int = 12
     specialist_steps: int = 30
+    preset: str = "balanced"  # balanced | lean | strict
+    custom_agents: list[CustomAgent] = field(default_factory=list)
     extra_rules: list[str] = field(default_factory=list)
     default_agent: bool = True
     scope: str = "project"  # project | global
@@ -82,6 +105,8 @@ def _clean(value) -> str | None:
 def _steps(value, default: int, field_name: str) -> int:
     if value is None:
         return default
+    if isinstance(value, bool):
+        raise StrategyError(f"{field_name}: 'steps' debe ser un entero positivo (recibido: {value!r})")
     try:
         steps = int(value)
     except (TypeError, ValueError):
@@ -122,12 +147,92 @@ def _enabled(value, default: bool = True) -> bool:
     return str(value).strip().lower() not in ("false", "no", "off", "0")
 
 
+def normalize_preset(value) -> str:
+    """balanced | lean | strict. `auto`/vacio equivalen a balanced."""
+    if value is None:
+        return "balanced"
+    text = str(value).strip().lower()
+    if text in ("", "auto", "none", "null", "default", "—", "-"):
+        return "balanced"
+    if text not in PRESETS:
+        raise StrategyError(
+            f"preset debe ser uno de {', '.join(PRESETS)} (recibido: {value!r})"
+        )
+    return text
+
+
+def _color(value) -> str:
+    text = "#9d7bff" if value is None or value == "" else str(value).strip()
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", text):
+        raise StrategyError(f"color debe ser un hex #rrggbb (recibido: {value!r})")
+    return text
+
+
+def _custom_agent(name: str, spec: dict) -> CustomAgent:
+    field_name = f"subagents.{name}"
+    raw_model = spec.get("model")
+    if raw_model is not None and not isinstance(raw_model, str):
+        raise StrategyError(f"{field_name}: 'model' debe ser texto (recibido: {raw_model!r})")
+    raw_tier = spec.get("tier")
+    tier = str(raw_tier).strip().lower() if raw_tier not in (None, "") else None
+    if tier in ("auto", "none", "null", "—", "-"):
+        tier = None
+    if tier is not None and tier not in CUSTOM_TIERS:
+        raise StrategyError(
+            f"{field_name}: 'tier' debe ser {', '.join(CUSTOM_TIERS)} (recibido: {raw_tier!r})"
+        )
+    raw_permissions = spec.get("permissions")
+    permissions = str(raw_permissions).strip().lower() if raw_permissions not in (None, "") else "edit"
+    if permissions not in CUSTOM_PERMISSIONS:
+        raise StrategyError(
+            f"{field_name}: 'permissions' debe ser "
+            f"{', '.join(CUSTOM_PERMISSIONS)} (recibido: {raw_permissions!r})"
+        )
+    for key, raw in (("description", spec.get("description")), ("prompt", spec.get("prompt"))):
+        if raw is not None and not isinstance(raw, str):
+            raise StrategyError(f"{field_name}: '{key}' debe ser texto (recibido: {raw!r})")
+    return CustomAgent(
+        name=name,
+        model=_clean(raw_model),
+        steps=_steps(spec.get("steps"), 20, field_name),
+        enabled=_enabled(spec.get("enabled"), True),
+        tier=tier,
+        permissions=permissions,
+        description=str(spec.get("description") or "").strip(),
+        prompt=str(spec.get("prompt") or "").strip(),
+        color=_color(spec.get("color")),
+    )
+
+
+def _custom_agents(subagents: dict) -> list[CustomAgent]:
+    fixed = {"local", "barato", "especialista", "specialist"}
+    seen: set[str] = set()
+    custom: list[CustomAgent] = []
+    for raw_name, spec in subagents.items():
+        name = str(raw_name).strip().lower()
+        if name in fixed:
+            continue
+        if not AGENT_NAME.fullmatch(name) or name in RESERVED_AGENTS:
+            raise StrategyError(
+                f"subagents.{raw_name}: nombre invalido. Usa minusculas, empieza por letra "
+                f"y solo [a-z0-9_-] (max. 40); reservados: {', '.join(sorted(RESERVED_AGENTS))}"
+            )
+        if name in seen:
+            raise StrategyError(f"subagents.{raw_name}: nombre duplicado tras normalizar")
+        if not isinstance(spec, dict):
+            raise StrategyError(f"subagents.{name}: debe ser un mapa con model/steps/...")
+        seen.add(name)
+        custom.append(_custom_agent(name, spec))
+    return custom
+
+
 def strategy_from_mapping(data: dict) -> Strategy:
     strategy = Strategy()
     if not isinstance(data, dict):
         return strategy
     strategy.orchestrator_model = _clean(data.get("orchestrator_model") or data.get("orquestador_model"))
     strategy.orchestrator_variant = _variant(data.get("orchestrator_variant"))
+    strategy.preset = normalize_preset(data.get("preset"))
     strategy.default_agent = bool(data.get("default_agent", True))
     strategy.scope = str(data.get("scope") or strategy.scope).strip().lower()
     strategy.extra_rules = _rules(data.get("rules"))
@@ -150,6 +255,7 @@ def strategy_from_mapping(data: dict) -> Strategy:
                 spec.get("steps"), strategy.specialist_steps, "subagents.especialista"
             )
             strategy.add_specialist = _enabled(spec.get("enabled"), strategy.add_specialist)
+        strategy.custom_agents = _custom_agents(subagents)
     return strategy
 
 
@@ -163,11 +269,14 @@ def _yaml_string(text: str) -> str:
 def strategy_text(strategy: Strategy, project: str) -> str:
     """Contenido exacto de `.orquestador.yaml` (sin tocar disco)."""
     safe_project = " ".join(str(project).splitlines())
+    preset = normalize_preset(strategy.preset)
     lines = [
         f"# Estrategia generada por orquestador para: {safe_project}",
         "# Edita y vuelve a ejecutar: orq generate --strategy <este fichero>",
         f"orchestrator_model: {strategy.orchestrator_model or 'auto'}",
         f"orchestrator_variant: {strategy.orchestrator_variant or 'auto'}",
+        "# preset: balanced (equilibrado) | lean (un solo trabajador) | strict (sin shell)",
+        f"preset: {preset}",
         f"default_agent: {str(strategy.default_agent).lower()}",
         f"scope: {strategy.scope}",
         "subagents:",
@@ -182,6 +291,22 @@ def strategy_text(strategy: Strategy, project: str) -> str:
         lines.append(f"    steps: {steps}")
         if not enabled:
             lines.append("    enabled: false")
+    for custom in strategy.custom_agents:
+        lines.append(f"  {custom.name}:")
+        lines.append(f"    model: {custom.model or 'auto'}")
+        lines.append(f"    steps: {custom.steps}")
+        if not custom.enabled:
+            lines.append("    enabled: false")
+        if custom.tier:
+            lines.append(f"    tier: {custom.tier}")
+        if custom.permissions != "edit":
+            lines.append(f"    permissions: {custom.permissions}")
+        if custom.description:
+            lines.append(f"    description: {_yaml_string(custom.description)}")
+        if custom.prompt:
+            lines.append(f"    prompt: {_yaml_string(custom.prompt)}")
+        if custom.color != "#9d7bff":
+            lines.append(f"    color: {_yaml_string(custom.color)}")
     if strategy.extra_rules:
         lines.append("rules:")
         for rule in strategy.extra_rules:
@@ -202,10 +327,15 @@ def save_strategy(path: Path, strategy: Strategy, project: str, backup: bool = F
 # --------------------------------------------------------------------------- #
 
 
-def pick_model(catalog: Catalog, tier: str, exclude: set[str] | None = None) -> ModelInfo | None:
+def pick_model(
+    catalog: Catalog,
+    tier: str,
+    exclude: set[str] | None = None,
+    fallback: bool = True,
+) -> ModelInfo | None:
     exclude = exclude or set()
     candidates = [m for m in catalog.by_tier(tier) if m.ref not in exclude]
-    if not candidates and tier == "cheap":
+    if not candidates and fallback and tier == "cheap":
         candidates = [m for m in catalog.by_tier("frontier") if m.ref not in exclude]
     if not candidates:
         return None
@@ -261,6 +391,7 @@ class AgentPlan:
     steps: int | None = None
     color: str = "#ffffff"
     reason: str = ""
+    custom: CustomAgent | None = None
 
 
 @dataclass
@@ -292,6 +423,7 @@ def _base_model(ref: str | None) -> str | None:
 
 def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | None = None) -> OrchestrationPlan:
     strategy = strategy or Strategy()
+    strategy.preset = normalize_preset(strategy.preset)
     strategy.orchestrator_model = _clean(strategy.orchestrator_model)
     strategy.cheap_model = _clean(strategy.cheap_model)
     strategy.local_model = _clean(strategy.local_model)
@@ -387,8 +519,49 @@ def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | N
         )
     )
 
-    if not strategy.add_local:
-        notes.append("Agente local desactivado en la estrategia.")
+    add_local, add_cheap, add_specialist = (
+        strategy.add_local, strategy.add_cheap, strategy.add_specialist
+    )
+    if strategy.preset == "lean":
+        # Un solo trabajador: local (privado/gratis) > barato > especialista.
+        candidates: list[str] = []
+        if add_local and strategy.local_model:
+            candidates.append("local")
+        if add_cheap and strategy.cheap_model:
+            candidates.append("barato")
+        if add_specialist:
+            candidates.append("especialista")
+        chosen = candidates[0] if candidates else None
+        add_local = chosen == "local"
+        add_cheap = chosen == "barato"
+        add_specialist = chosen == "especialista"
+        if chosen:
+            notes.append(
+                f"Preset lean: se genera un solo trabajador ('{chosen}') para reducir "
+                "contexto y coste; los demas roles fijos quedan fuera."
+            )
+        else:
+            notes.append(
+                "Preset lean: no hay ningun trabajador disponible; solo se genera el orquestador."
+            )
+        enabled_custom = [c for c in strategy.custom_agents if c.enabled]
+        if enabled_custom:
+            notes.append(
+                f"Preset lean: se omiten {len(enabled_custom)} subagente(s) personalizado(s). "
+                "Usa balanced para incluirlos."
+            )
+    elif strategy.preset == "strict":
+        notes.append(
+            "Preset strict: los subagentes no tienen shell y las ediciones cloud piden "
+            "confirmacion; el orquestador tampoco puede navegar."
+        )
+
+    if not add_local:
+        notes.append(
+            "Agente local desactivado en la estrategia."
+            if not strategy.add_local
+            else "Preset lean: se omite el agente local."
+        )
     elif strategy.local_model:
         agents.append(
             AgentPlan(
@@ -404,8 +577,12 @@ def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | N
     else:
         notes.append("Se omite el agente local: no hay modelos locales configurados.")
 
-    if not strategy.add_cheap:
-        notes.append("Agente barato desactivado en la estrategia.")
+    if not add_cheap:
+        notes.append(
+            "Agente barato desactivado en la estrategia."
+            if not strategy.add_cheap
+            else "Preset lean: se omite el agente barato."
+        )
     elif strategy.cheap_model:
         agents.append(
             AgentPlan(
@@ -421,7 +598,7 @@ def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | N
     else:
         notes.append("Se omite el agente barato: no hay modelos economicos detectados.")
 
-    if strategy.add_specialist:
+    if add_specialist:
         agents.append(
             AgentPlan(
                 name="especialista",
@@ -434,6 +611,45 @@ def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | N
             )
         )
 
+    if strategy.preset != "lean":
+        for custom in strategy.custom_agents:
+            if not custom.enabled:
+                notes.append(f"Subagente personalizado '{custom.name}' desactivado en la estrategia.")
+                continue
+            model = _clean(custom.model)
+            if model is None:
+                wanted = custom.tier or "cheap"
+                # Un tier explicito no se cambia por otro: pedir `local` y acabar en la
+                # nube rompe la promesa de privacidad. Solo el modo sin tier prueba local.
+                picked = pick_model(catalog, wanted, fallback=custom.tier is None)
+                if picked is None and custom.tier is None:
+                    picked = pick_model(catalog, "local")
+                if picked is None:
+                    notes.append(
+                        f"Se omite el subagente '{custom.name}': no hay modelos para elegir "
+                        f"automaticamente (tier {wanted})."
+                    )
+                    continue
+                model = picked.ref
+                notes.append(
+                    f"Subagente '{custom.name}': modelo automatico {model}."
+                )
+            tier = custom.tier or tier_of(catalog, model.split("#", 1)[0])
+            if tier == "desconocido":
+                tier = "cheap"
+            agents.append(
+                AgentPlan(
+                    name=custom.name,
+                    role="subagent",
+                    tier=tier,
+                    model=model,
+                    steps=custom.steps,
+                    color=custom.color,
+                    reason=custom.description or f"Subagente personalizado '{custom.name}'.",
+                    custom=custom,
+                )
+            )
+
     plan = OrchestrationPlan(
         project=profile.name,
         profile=profile,
@@ -441,25 +657,42 @@ def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | N
         agents=agents,
         notes=notes,
     )
-    plan.provider_patches = provider_patches(catalog, strategy)
+    plan.provider_patches = provider_patches(catalog, strategy, plan.agents)
     return plan
 
 
-def provider_patches(catalog: Catalog, strategy: Strategy) -> list[dict]:
+def provider_patches(
+    catalog: Catalog,
+    strategy: Strategy,
+    agents: list[AgentPlan] | None = None,
+) -> list[dict]:
     """Bloques de provider listos para pegar en opencode.jsonc si faltan."""
     patches: list[dict] = []
-    if not strategy.add_local:
-        return patches
-    for agent_model in (strategy.local_model,):
-        if not agent_model:
+    candidates: list[str] = []
+    if agents is not None:
+        candidates = [a.model for a in agents if a.model and a.role == "subagent"]
+    else:
+        if strategy.add_local and strategy.local_model:
+            candidates.append(strategy.local_model)
+        if strategy.preset != "lean":
+            for custom in strategy.custom_agents:
+                if custom.enabled and custom.model:
+                    candidates.append(custom.model)
+    seen: set[tuple[str, str]] = set()
+    for agent_model in candidates:
+        ref = agent_model.split("#", 1)[0]
+        if "/" not in ref:
             continue
-        provider_name = agent_model.split("/", 1)[0]
+        provider_name, model_id = ref.split("/", 1)
         provider = catalog.providers.get(provider_name)
         if provider is None or not provider.base_url:
             continue
         if provider.declared_models:
             continue
-        model_id = agent_model.split("/", 1)[1]
+        key = (provider_name, model_id)
+        if key in seen:
+            continue
+        seen.add(key)
         patches.append(
             {
                 "provider": provider_name,

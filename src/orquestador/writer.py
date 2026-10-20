@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 from .catalog import GLOBAL_CONFIG_DIR, meta_for, strip_jsonc, tool_support
 from .fsutil import atomic_write_text, backup_file
 from .planner import OrchestrationPlan, Strategy, strategy_text
+from .scan import ProjectProfile, scan_project
 from .templates import default_agent_snippet, provider_snippet, render_agent
 
 STRATEGY_FILE = ".orquestador.yaml"
@@ -266,11 +268,25 @@ def planned_files(
 
     if target_dir.is_dir():
         planned_names = {agent.name for agent in plan.agents}
+        custom_names = {custom.name for custom in plan.strategy.custom_agents}
+        generated_names = set(GENERATED_AGENTS) | custom_names
         for path in sorted(target_dir.glob("*.md")):
-            if path.stem in GENERATED_AGENTS and path.stem not in planned_names:
+            if path.stem in generated_names and path.stem not in planned_names:
+                if plan.strategy.preset == "lean":
+                    reason = "preset lean"
+                elif path.stem in custom_names:
+                    custom = next(c for c in plan.strategy.custom_agents if c.name == path.stem)
+                    reason = "enabled: false" if not custom.enabled else "fuera del plan"
+                else:
+                    enabled = {
+                        "local": plan.strategy.add_local,
+                        "barato": plan.strategy.add_cheap,
+                        "especialista": plan.strategy.add_specialist,
+                    }.get(path.stem, True)
+                    reason = "enabled: false" if not enabled else "fuera del plan"
                 notes.append(
                     f"{path.name} sigue en disco pero ya no esta en el plan "
-                    "(enabled: false). Borralo si quieres desactivarlo del todo."
+                    f"({reason}). Borralo si quieres desactivarlo del todo."
                 )
 
     if set_default_agent and plan.strategy.default_agent:
@@ -386,18 +402,38 @@ def effective_permissions(front: dict) -> dict[tuple[str, str], str]:
     return out
 
 
+def permission_effect(front: dict, action: str, resource: str) -> str | None:
+    """Evalua una regla concreta respetando comodines y el orden (gana la ultima)."""
+    effect: str | None = None
+    for rule in permission_rules(front):
+        if str(rule["action"]) != action:
+            continue
+        pattern = str(rule.get("resource", "*"))
+        if pattern == "*" or pattern == resource or fnmatchcase(resource, pattern):
+            effect = str(rule.get("effect", "allow"))
+    return effect
+
+
 def validate(
     project_dir: Path,
     scope: str = "project",
     catalog=None,
     strategy: Strategy | None = None,
+    profile: ProjectProfile | None = None,
+    planned_names: set[str] | None = None,
+    report_stale: bool = True,
 ) -> list[tuple[str, str]]:
-    """Devuelve lista de (nivel, mensaje): nivel 'error' o 'warn'."""
+    """Devuelve lista de (nivel, mensaje): nivel 'error' o 'warn'.
+
+    `planned_names` permite distinguir agentes que ya no pertenecen al plan actual
+    (por ejemplo con `preset: lean`) de agentes escritos a mano.
+    """
     problems: list[tuple[str, str]] = []
     target_dir = agents_dir(scope, project_dir)
     if not target_dir.is_dir():
         problems.append(("error", f"No existe el directorio de agentes: {target_dir}"))
         return problems
+    secret_paths = (profile or scan_project(project_dir)).secret_paths
 
     files = sorted(target_dir.glob("*.md"))
     if not files:
@@ -446,6 +482,18 @@ def validate(
                               f"(disponibles: {disponibles})")
                 )
 
+    stale_generated: set[str] = set()
+    if planned_names is not None:
+        known = set(GENERATED_AGENTS)
+        if strategy is not None:
+            known |= {custom.name for custom in strategy.custom_agents}
+        stale_generated = (names - planned_names) & known
+        if report_stale:
+            for name in sorted(stale_generated):
+                problems.append(
+                    ("warn", f"{name}.md no esta en el plan actual; borralo si no lo usas")
+                )
+
     orch = fronts.get("orquestador")
     if orch is not None:
         effective = effective_permissions(orch)
@@ -467,14 +515,26 @@ def validate(
         for target in sorted(allowed):
             if target not in names:
                 problems.append(("error", f"orquestador.md: permite '{target}' pero ese agente no existe"))
+        for target in sorted(names - {"orquestador"}):
+            if target in stale_generated:
+                continue
+            if target not in allowed:
+                problems.append(
+                    ("warn", f"orquestador.md: no puede delegar en '{target}' (revisa sus permisos)")
+                )
 
     for name, front in fronts.items():
+        for secret in secret_paths[:20]:
+            for action in ("read", "edit"):
+                if permission_effect(front, action, secret) != "deny":
+                    problems.append(
+                        ("warn", f"{name}.md: no deniega {action} de '{secret}'")
+                    )
         if name == "orquestador":
             continue
-        effective = effective_permissions(front)
-        if effective.get(("subagent", "*")) == "allow":
+        if permission_effect(front, "subagent", "*") == "allow":
             problems.append(("warn", f"{name}.md: permite subagent '*'; conviene cerrar la lista"))
-        if effective.get(("external_directory", "*")) != "deny":
+        if permission_effect(front, "external_directory", "*") != "deny":
             problems.append(
                 ("warn", f"{name}.md: no deniega external_directory; puede salir del proyecto")
             )

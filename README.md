@@ -27,17 +27,23 @@ Seguiendo la guia [Orquestador de agentes (ai.manz.dev)](https://ai.manz.dev/lea
 6. **Valida** el resultado: modelos inexistentes, orquestador que puede editar, permisos que
    apuntan a agentes inexistentes, etc.
 
-Los agentes generados son:
+Los agentes fijos generados son:
 
 | Agente | Modelo | Que hace |
 | --- | --- | --- |
-| `orquestador` | frontera | Decide, descompone, delega. `edit`/`write`/`shell` denegados: no puede tocar nada. |
+| `orquestador` | frontera | Decide, descompone, delega. `edit`/`shell` denegados: no puede tocar nada. |
 | `local` | local | Leer, buscar, editar en masa. `webfetch`/`websearch` y ficheros `.env` denegados: nada sale de la maquina. |
 | `barato` | barato | Renombrados, formateo, redaccion simple. `edit`/`shell` en `ask`. |
 | `especialista` | frontera | Trabajo profundo de dominio (Laravel, Python...). Puede editar, pero delega lo mecanico en `local`/`barato` para no gastar su contexto caro. |
 
+Ademas puedes declarar **subagentes personalizados** (por ejemplo `frontend`, `seguridad`,
+`migraciones`) con su propio modelo, prompt y permisos; el orquestador los enruta igual.
+Mira [presets y subagentes](#presets-de-jerarquia).
+
 El reparto por defecto del trabajo es **50% local / 30% barato / 15% especialista /
 5% orquestador**, ajustable con `--local-share` / `--cheap-share` / `--specialist-share`.
+Los subagentes personalizados comparten la parte de su `tier` (por ejemplo, dos agentes
+`cheap` se reparten el 30% de `barato`).
 El calculo usa **un unico presupuesto de tokens por sesion** (100k por defecto) y
 reparte la parte de los roles que no existan entre los presentes, para que el ahorro
 compare el mismo trabajo. Con precios reales de models.dev, un plan mixto suele salir
@@ -105,7 +111,9 @@ cd /ruta/de/tu/proyecto
 orq init
 ```
 
-Te muestra el stack, los modelos detectados y te deja elegir cual va a cada rol.
+Te muestra el stack, los modelos detectados, te deja elegir el **preset de jerarquia**
+(`balanced`, `lean` o `strict`) y cual va a cada rol. Tambien puedes pasarlo directo:
+`orq init --preset lean`.
 
 Si algún tier está vacío —típico si solo tienes modelos locales—, **no se salta la
 pregunta**: te ofrece todos los modelos disponibles marcados con su tier real y tú
@@ -119,6 +127,9 @@ orq generate --orchestrator-model openai/gpt-6-astra#high \
              --cheap-model openai/gpt-6-luna#low \
              --local-model lemonade/Qwen3.8-27B-GGUF-UD-Q4_K_XL
 ```
+
+`--preset balanced|lean|strict` cambia la jerarquia sin tocar los modelos. Se guarda en
+`.orquestador.yaml`, asi que las siguientes ejecuciones lo respetan.
 
 ### Informacion
 
@@ -194,8 +205,8 @@ orq diff --json | jq '.files[] | select(.status != "unchanged")'
 
 ### Permisos de los agentes
 
-Los cuatro agentes generados comparten una politica minima, ademas de la que ya
-describe la tabla de arriba:
+Los agentes generados (incluidos los personalizados) comparten una politica minima,
+ademas de la que ya describe la tabla de arriba:
 
 - `external_directory` denegado: no leen ni escriben fuera del proyecto.
 - Los ficheros sensibles detectados (`.env`, claves, certificados) se deniegan para
@@ -203,12 +214,18 @@ describe la tabla de arriba:
 - El agente `local` deniega los comandos de red (`curl`, `wget`, `nc`, `ssh`, `scp`,
   `git push`). Es un guardarrail contra fugas accidentales, no un sandbox.
 - El orquestador no lee secretos: su contexto se resume al plan.
+- `preset: strict` ademas quita el shell a todos los subagentes, hace que las ediciones
+  de los agentes cloud pidan confirmacion y evita que el orquestador navegue por la web.
+- En un subagente personalizado, `permissions: read` deniega `edit` y `shell`;
+  `edit` (por defecto) permite editar y pide confirmacion para shell; `full` permite
+  ambos. Los secretos se deniegan siempre, incluso con `full`.
 
 ## Estrategia: `.orquestador.yaml`
 
 Se genera automaticamente y es la fuente de verdad para re-generar. Editalo a tu gusto:
 
 ```yaml
+preset: balanced
 orchestrator_model: openai/gpt-6-astra
 orchestrator_variant: auto
 default_agent: true
@@ -224,15 +241,73 @@ subagents:
   especialista:
     model: openai/gpt-6-astra
     steps: 30
+  frontend:
+    model: auto          # elige por tier; tambien acepta provider/model#variant
+    tier: cheap          # local | cheap | frontier
+    steps: 18
+    description: "Implementa y revisa UI"
+    prompt: "Trabaja solo en src/components. No toques el backend."
+    permissions: edit    # read | edit (por defecto) | full
 rules:
   - "Para migraciones de base de datos, delega siempre en especialista"
 ```
+
+### Presets de jerarquia
+
+`preset` decide cuantos agentes se generan y como se endurecen:
+
+- **`balanced`** (por defecto): orquestador + `local`, `barato`, `especialista` y todos
+  los subagentes personalizados que añadas.
+- **`lean`**: orquestador + **un solo** trabajador, por orden `local` > `barato` >
+  `especialista`. Los demas roles fijos y los personalizados se omiten. Ideal para
+  proyectos pequeños o para no llenar el selector de agentes.
+- **`strict`**: misma jerarquia que `balanced`, pero los subagentes no tienen shell, las
+  ediciones de los agentes cloud piden confirmacion y el orquestador no puede navegar.
+
+`auto`, `default` o dejar la clave vacia equivalen a `balanced`. Tambien puedes cambiar el
+preset sin editar el YAML:
+
+```bash
+orq generate --preset lean
+orq compare --preset strict --sessions 10
+```
+
+### Subagentes personalizados
+
+Cualquier clave bajo `subagents` que no sea `local`, `barato`, `especialista` (o su alias
+`specialist`) se trata como un agente propio. El nombre debe empezar por letra, usar solo
+`[a-z0-9_-]` (max. 40) y no puede coincidir con `orquestador`, `local`, `barato` ni
+`especialista`.
+
+Campos:
+
+- `model`: `provider/model` (con `#variant` opcional) o `auto`. Si falta, se elige por
+  `tier`.
+- `tier`: `local`, `cheap` o `frontier`. Sirve para elegir modelo automatico y para
+  repartir el presupuesto de tokens en `orq compare`.
+- `steps`: entero positivo (20 por defecto).
+- `enabled: false`: no se genera ni se ofrece al orquestador; su parte del coste se
+  reparte entre el resto.
+- `description`: una linea; es lo que ve el orquestador para decidir a quien delegar.
+- `prompt`: instrucciones propias del agente. Si no lo pones, se usa un prompt generico.
+- `permissions`: `read` (solo lectura, sin shell), `edit` (editar y pedir confirmacion
+  para shell) o `full` (editar y shell).
+- `color`: hex `#rrggbb` opcional.
+
+El orquestador recibe automaticamente permiso para delegar en cada subagente
+personalizado y una linea de enrutado con su descripcion. Todos heredan la politica de
+seguridad comun: sin `external_directory`, sin secretos y sin delegar en otros agentes.
 
 Cada subagente acepta `enabled: false`: no se genera su `.md`, el orquestador no lo
 ofrece como delegado y su parte del trabajo se reparte entre los que quedan (también en
 `orq compare`). Sirve, por ejemplo, para un portátil sin modelo local o para no enviar
 nada a la nube con el agente `barato`. Si el `.md` ya existía de una generación anterior,
-`orq` no lo borra por su cuenta: te avisa para que lo elimines tú.
+`orq` no lo borra por su cuenta: te avisa para que lo elimines tú. Lo mismo aplica si
+cambias a `preset: lean` o quitas un subagente personalizado de la estrategia: borra los
+`.md` que ya no uses.
+
+`--force` vuelve a escribir los agentes del plan actual, pero nunca borra los que quedan
+fuera. `orq check` tambien los marca como "no esta en el plan actual".
 
 Despues: `orq generate` (sin `--force` no pisa ficheros existentes; con `--force` los rehace).
 
