@@ -114,6 +114,7 @@ def test_scan_laravel(tmp_path):
     _make_laravel(tmp_path)
     profile = scan_project(tmp_path)
     assert "laravel" in profile.frameworks
+    assert "php" in profile.runtimes
     assert profile.primary_language == "php"
     assert profile.test_command == "./vendor/bin/phpunit"
     assert ".env" in profile.secret_paths
@@ -126,7 +127,7 @@ def test_scan_node_vitest(tmp_path):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.ts").write_text("export const a = 1")
     profile = scan_project(tmp_path)
-    assert "node" in profile.frameworks
+    assert "node" in profile.runtimes
     assert profile.test_command == "npx vitest run"
     assert profile.languages["typescript"] == 1
 

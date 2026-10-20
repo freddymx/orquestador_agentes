@@ -510,7 +510,7 @@ def build_catalog(
     models: list[ModelInfo] = []
     seen: set[str] = set()
     for provider in providers.values():
-        for model_id, meta in provider.declared_models.items():
+        for model_id, spec in provider.declared_models.items():
             ref = f"{provider.name}/{model_id}"
             if ref in seen:
                 continue
@@ -519,10 +519,10 @@ def build_catalog(
                 ModelInfo(
                     provider=provider.name,
                     model_id=model_id,
-                    display_name=(meta or {}).get("name") or model_id,
+                    display_name=(spec or {}).get("name") or model_id,
                     source="config",
-                    context=((meta or {}).get("limit") or {}).get("context"),
-                    capabilities=(meta or {}).get("capabilities") or {},
+                    context=((spec or {}).get("limit") or {}).get("context"),
+                    capabilities=(spec or {}).get("capabilities") or {},
                 )
             )
 
@@ -565,9 +565,9 @@ def build_catalog(
             excluded.append(model)
             continue
         if model.context is None:
-            meta = meta_for(model.ref)
-            if meta is not None and meta.context:
-                model.context = meta.context
+            model_meta = meta_for(model.ref)
+            if model_meta is not None and model_meta.context:
+                model.context = model_meta.context
         kept.append(model)
 
     return Catalog(providers=providers, models=kept, probed=probed, excluded=excluded)

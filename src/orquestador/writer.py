@@ -331,8 +331,9 @@ def write_plan(
         if item.kind == "strategy":
             strategy_path = item.path
         elif item.kind == "config-patch":
+            agent_name = plan.orchestrator.name if plan.orchestrator is not None else "orquestador"
             notes.append(
-                f"{item.path.name}: anadido \"default_agent\": \"{plan.orchestrator.name}\" "
+                f"{item.path.name}: anadido \"default_agent\": \"{agent_name}\" "
                 "conservando el resto."
             )
 

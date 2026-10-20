@@ -77,7 +77,6 @@ def _as_bullet(rule: str) -> str:
 
 def orchestrator_prompt(plan: OrchestrationPlan) -> str:
     profile = plan.profile
-    targets = plan.delegation_targets
     local = next((a for a in plan.subagents if a.tier == "local"), None)
     cheap = next((a for a in plan.subagents if a.tier == "cheap"), None)
     specialist = next((a for a in plan.subagents if a.tier == "frontier"), None)
@@ -322,12 +321,12 @@ def specialist_agent(plan: OrchestrationPlan, agent: AgentPlan) -> str:
             "- No introduzgas paquetes nuevos sin avisar: primero busca si ya existe una solucion interna.",
             "- Cuidado con N+1 y con consultas dentro de bucles.",
         ]
-    if "python" in profile.frameworks:
+    if "python" in profile.runtimes:
         body += [
             "- Python: tipado cuando exista en el proyecto, docstrings en la API publica.",
             "- No anadas dependencias sin avisar; usa primero la biblioteca estandar.",
         ]
-    if "node" in profile.frameworks:
+    if "node" in profile.runtimes:
         body += [
             "- Node/TS: respeta el sistema de modulos y el estilo del proyecto.",
             "- No anadas dependencias sin avisar; comprueba primero el lockfile.",

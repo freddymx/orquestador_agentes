@@ -327,7 +327,7 @@ def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | N
             )
 
     orchestrator_ref = strategy.orchestrator_model
-    base_ref, _, inline_variant = (orchestrator_ref or "").partition("#")
+    raw_ref, _, inline_variant = (orchestrator_ref or "").partition("#")
     raw_variant = (strategy.orchestrator_variant or "").strip().lower()
     disable_variant = raw_variant in ("none", "default")
     requested = None if disable_variant else (_clean(strategy.orchestrator_variant) or _clean(inline_variant))
@@ -339,7 +339,7 @@ def build_plan(profile: ProjectProfile, catalog: Catalog, strategy: Strategy | N
             f"se usa '{requested}'."
         )
 
-    base_ref = _clean(base_ref)
+    base_ref = _clean(raw_ref) or None
     meta = meta_for(base_ref) if base_ref else None
     variant = requested
     if variant is None and not disable_variant and meta is not None:

@@ -12,8 +12,9 @@ Seguiendo la guia [Orquestador de agentes (ai.manz.dev)](https://ai.manz.dev/lea
 
 ## Que hace
 
-1. **Escanea el proyecto**: lenguaje, stack (Laravel, Python, Node, Rust...), comandos de
-   test y lint, carpetas clave y ficheros sensibles (`.env`, claves).
+1. **Escanea el proyecto**: lenguaje, **runtimes y frameworks reales** (Laravel, Next.js,
+   FastAPI, Django, Gin...), comandos de test/lint/build leídos de los scripts del proyecto,
+   carpetas clave y ficheros sensibles (`.env`, claves).
 2. **Descubre los modelos**: lee `opencode.json(c)` de proyecto y global (soporta `providers`
    y `provider`), y **sondea** los endpoints OpenAI-compatible (`llama.cpp`, Lemonade,
    Ollama...) para listar los modelos que realmente sirven.
@@ -47,6 +48,26 @@ exacta depende de las tarifas de tus modelos (`orq compare`).
 > modelo local que haya y lo avisa: un orquestador sin `model` heredaria el de la sesion
 > padre, que es justo el gasto que esto evita.
 
+## Deteccion de stack
+
+No adivina por el nombre del directorio: lee los manifiestos y separa **runtime** de
+**framework**. Un `composer.json` cualquiera ya no se etiqueta como Laravel; hace falta
+`laravel/framework` o un `artisan` real.
+
+- **PHP**: `composer.json` (`require`/`require-dev` y `scripts`), `pest.php`, `phpunit.xml`,
+  `pint.json`, `.php-cs-fixer.php`, `phpcs.xml`.
+- **Node/TS**: `package.json` (dependencias y scripts), `pnpm-lock.yaml`/`yarn.lock`/`bun.lock`,
+  configs de vitest/jest/playwright, ESLint/Biome.
+- **Python**: `pyproject.toml` (`project`, `dependency-groups`, Poetry, `[tool.pytest]`,
+  `[tool.ruff]`), `requirements*.txt`, `Pipfile`; usa `uv run` solo si hay `uv.lock`.
+- **Rust/Go/Ruby/JVM/.NET/Swift/Elixir**: `Cargo.toml`, `go.mod`, `Gemfile`, Gradle/Maven,
+  `.csproj`/`.sln`, `Package.swift`, `mix.exs`.
+- Si no hay comando de ecosistema, prueba objetivos `test`/`lint`/`build` en el `Makefile`.
+
+Los comandos solo se proponen si el script existe: no veras `npm run lint` en un proyecto
+sin script `lint`. `orq detect --json` expone `runtimes`, `frameworks` y los tres comandos
+por separado.
+
 ## Instalacion
 
 Global, para poder ejecutarlo desde cualquier directorio:
@@ -60,12 +81,14 @@ Queda disponible como `orq` en `~/.local/bin`. Al ser una instalacion **editable
 comando global apunta al codigo del repo: si editas `src/orquestador/` y vuelves a
 ejecutar `orq`, ya tienes el cambio. No hay que reinstalar nada.
 
-Para desarrollo (tests, sincronizar deps):
+Para desarrollo (tests, lint, tipos, sincronizar deps):
 
 ```bash
 cd /ruta/al/repo
 uv sync
 uv run pytest
+uv run ruff check .
+uv run mypy
 ```
 
 Si mas adelante quieres una copia congelada en vez de editar el repo, quita el `-e`:
@@ -246,8 +269,14 @@ orq models --endpoint http://localhost:8080/v1
 ## Tests
 
 ```bash
-uv run pytest
+uv run pytest        # suite completa
+uv run ruff check .  # errores reales (imports sin usar, nombres indefinidos...)
+uv run mypy          # tipado de src/orquestador
 ```
+
+La CI (`.github/workflows/ci.yml`) ejecuta las tres cosas en Python 3.11 y 3.12. Los tests
+no leen la cache real de models.dev: `tests/conftest.py` la sustituye por un fichero vacio
+y el fixture `models_cache` inyecta metadatos falsos.
 
 ## Por que Python y no Rust
 

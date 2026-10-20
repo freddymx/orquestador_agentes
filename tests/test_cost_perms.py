@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from orquestador.catalog import build_catalog, blended_price, is_chat_model, ModelInfo, Provider
+from orquestador.catalog import build_catalog, blended_price, ModelInfo, Provider
 from orquestador.cost import DEFAULT_MIX, estimate
 from orquestador.planner import Strategy, build_plan
 from orquestador.scan import scan_project
@@ -101,7 +101,10 @@ def test_specialist_without_any_worker_has_no_allow(tmp_path):
     agent_file.write_text(render_agent(plan, plan.orchestrator), encoding="utf-8")
     front, _ = parse_agent_file(agent_file)
     effective = effective_permissions(front)
-    assert not [r for (a, _), effect in effective.items() if a == "subagent" and effect == "allow"]
+    assert not any(
+        action == "subagent" and effect == "allow"
+        for (action, _), effect in effective.items()
+    )
 
 
 def _laravel(root):
@@ -312,10 +315,10 @@ def test_ask_role_falls_back_to_all_models_when_tier_empty():
     assert catalog.by_tier("frontier") == []
     offered = list(catalog.models)
     try:
-        result = _ask_role(catalog, None, "orquestador", "frontera", offered, empty_hint="x")
+        _ask_role(catalog, None, "orquestador", "frontera", offered, empty_hint="x")
     except Exception:
         # Sin stdin no puede preguntar: lo que importa es que le llegaba lista.
-        result = None
+        pass
     assert len(offered) == 2
     assert all(m.ref.startswith("llamacpp/") for m in offered)
 

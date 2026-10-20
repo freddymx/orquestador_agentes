@@ -125,6 +125,7 @@ def detect(
                 "stack": profile.stack_label,
                 "primary_language": profile.primary_language,
                 "languages": profile.languages,
+                "runtimes": profile.runtimes,
                 "frameworks": profile.frameworks,
                 "key_dirs": profile.key_dirs,
                 "test_command": profile.test_command,
@@ -756,7 +757,7 @@ def agents(
             })) or "—",
         )
     console.print(table)
-    console.print(f"[dim]Cuerpo completo: orq agents --show <nombre>[/dim]")
+    console.print("[dim]Cuerpo completo: orq agents --show <nombre>[/dim]")
     raise typer.Exit(0)
 
 

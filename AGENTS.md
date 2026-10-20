@@ -8,20 +8,23 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
 
 - `uv sync` — the only dependency entrypoint. `src/` layout + hatchling means
   `import orquestador` works inside the uv env, not from a bare `python`.
-- `uv run pytest` — full suite (~0.3s, 120 tests). One test:
+- `uv run pytest` — full suite (~0.4s, 144 tests). One test:
   `uv run pytest tests/test_generate.py::test_force_never_clobbers_existing_config`.
   `tests/conftest.py` points `ORQ_MODELS_CACHE` at a missing file: tests must not depend on
   the machine's models.dev cache. Use the `models_cache` fixture to inject fake metadata.
-- There is no ruff/mypy/formatter config and no CI. Do not invent `make lint` or a typecheck
-  step; verification is the test suite plus `uv run orq detect --no-probe --json`.
+- `uv run ruff check .` — correctness rules only (`E4/E7/E9/F`); `line-length = 100` is set
+  for formatting, not enforced as E501.
+- `uv run mypy` — typed over `src/orquestador` (`check_untyped_defs`). Both run in CI
+  (`.github/workflows/ci.yml`) on Python 3.11 and 3.12; keep the baseline green.
 - The global `orq` is installed editable (`uv tool install -e .`), so `src/` edits are live
   without reinstalling. New `[project].dependencies` are the exception: re-run
   `uv tool install -e .` to refresh the tool env.
 
 ## Layout (`src/orquestador`)
 
-- `scan.py` — `ProjectProfile`: language counts, frameworks, test/lint/build commands, secret
-  files, key dirs. Caps at 4000 files.
+- `scan.py` — `ProjectProfile`: language counts, `runtimes`, evidence-based `frameworks`,
+  test/lint/build commands read from scripts/manifests, secret files, key dirs. Caps at 4000
+  files.
 - `catalog.py` — merges project + `~/.config/opencode` configs, probes OpenAI-compatible
   `/v1/models`, reads OpenCode's models.dev cache (`~/.cache/opencode/models.json`) for
   `tool_call`, context, price and variants, assigns a tier.
@@ -63,6 +66,15 @@ team into it: `.opencode/agents/*.md`, a `default_agent` patch in `opencode.json
   `generate` never deletes an existing `.md` for it, it only warns. Disabling is a plan-level
   decision, not a destructive clean-up. `enabled` accepts `true/false` and the string forms
   `"false"`/`"no"`/`"off"`/`"0"`.
+- `scan` keeps `runtimes` and `frameworks` separate: `node`/`python`/`php` are runtimes, not
+  frameworks. A framework needs evidence in the manifest (`laravel/framework`, `next`,
+  `fastapi`, `gin`...); a bare `composer.json` is not Laravel. Docker and CI are `signals`,
+  never frameworks.
+- Commands come from the project before heuristics: `composer.json` scripts, `package.json`
+  scripts and lockfile (npm/pnpm/yarn/bun), `pyproject.toml`/`requirements.txt` (uv + pytest +
+  ruff), `Cargo.toml`, `go.mod`, `Gemfile`, Gradle/Maven, `.csproj`, `Package.swift` and
+  `mix.exs`. `Makefile` targets (`test`/`lint`/`build`) are the last resort. Do not emit a
+  command for a script that does not exist.
 - Model refs are `provider/model` with optional `#variant`; helpers strip the variant when
   resolving. `Catalog.find` accepts the full ref or the bare model id.
 - `orchestrator_variant: auto` (the default) applies `high` only when models.dev declares it;
