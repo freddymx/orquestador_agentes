@@ -17,6 +17,17 @@ from .templates import default_agent_snippet, provider_snippet, render_agent
 STRATEGY_FILE = ".orquestador.yaml"
 GENERATED_AGENTS = ("orquestador", "local", "barato", "especialista")
 
+# Agente fijo -> tier que su rol exige. La privacidad y el coste dependen de que cada
+# agente use un modelo de su tier: el 'local' exige un endpoint local, el resto roles
+# cloud (barato es barato en la nube; orquestador/especialista son de frontera).
+FIXED_TIER = {
+    "orquestador": "frontier",
+    "local": "local",
+    "barato": "cheap",
+    "especialista": "frontier",
+    "specialist": "frontier",
+}
+
 
 @dataclass
 class WriteResult:
@@ -415,6 +426,45 @@ def permission_effect(front: dict, action: str, resource: str) -> str | None:
     return effect
 
 
+def _tier_contract_problems(
+    path: Path,
+    name: str,
+    ref: str | None,
+    catalog,
+    non_local_available: bool,
+) -> list[tuple[str, str]]:
+    """Cada agente fijo debe usar un modelo de su tier (solo con info determinista).
+
+    El rol 'local' exige un endpoint local: si un agente local apunta a la nube, rompe
+    la privacidad (los datos saliran de la maquina) -> ERROR. Los demas roles esperan
+    modelo cloud: si usan uno local, AVISAMOS, pero solo cuando hay alternatives cloud,
+    para no marcar el fallback legitimo de un entorno con solo modelos locales.
+    """
+    out: list[tuple[str, str]] = []
+    expected = FIXED_TIER.get(name)
+    if expected is None or not ref or not ref.count("/"):
+        return out
+    provider = catalog.providers.get(ref.split("/", 1)[0])
+    is_local = bool(provider and provider.is_local)
+    if expected == "local" and not is_local:
+        out.append(
+            (
+                "error",
+                f"{path.name}: el agente local usa '{ref}', que no es un endpoint local; "
+                "romperia la privacidad (los datos salrian de la maquina)",
+            )
+        )
+    elif expected != "local" and is_local and non_local_available:
+        out.append(
+            (
+                "warn",
+                f"{path.name}: el agente '{name}' (rol {expected}) usa un modelo local; con "
+                "un proveedor cloud disponible, usalo en vez de saturar la maquina",
+            )
+        )
+    return out
+
+
 def validate(
     project_dir: Path,
     scope: str = "project",
@@ -443,6 +493,11 @@ def validate(
 
     names: set[str] = set()
     fronts: dict[str, dict] = {}
+    # Para no falsamente marcar un orquestador/especialista 'local' en un entorno donde
+    # solo hay modelos locales (el fallback documentado), solo avisamos si hay alternatives cloud.
+    non_local_available = bool(catalog) and any(
+        p.base_url and not p.is_local for p in catalog.providers.values()
+    )
     for path in files:
         name = path.stem
         names.add(name)
@@ -474,6 +529,8 @@ def validate(
                 problems.append(
                     (level, f"{path.name}: '{ref}' no soporta tool calling; no podra usar herramientas")
                 )
+            else:
+                problems.extend(_tier_contract_problems(path, name, ref, catalog, non_local_available))
         if variant:
             meta = meta_for(ref) if ref else None
             if meta is not None and meta.variants_known and variant not in meta.variants:
@@ -490,9 +547,11 @@ def validate(
             known |= {custom.name for custom in strategy.custom_agents}
         stale_generated = (names - planned_names) & known
         if report_stale:
+            lean = strategy is not None and strategy.preset == "lean"
             for name in sorted(stale_generated):
+                reason = "preset lean" if lean else "fuera del plan"
                 problems.append(
-                    ("warn", f"{name}.md no esta en el plan actual; borralo si no lo usas")
+                    ("warn", f"{name}.md no esta en el plan actual ({reason}); borralo si no lo usas")
                 )
 
     orch = fronts.get("orquestador")
@@ -543,14 +602,6 @@ def validate(
     cfg = config_file(scope, project_dir)
     if cfg.exists() and "default_agent" not in cfg.read_text(encoding="utf-8"):
         problems.append(("warn", f"{cfg.name}: no define 'default_agent'"))
-
-    if strategy is not None and strategy.add_local and strategy.local_model and catalog is not None:
-        provider_name = strategy.local_model.split("/", 1)[0]
-        provider = catalog.providers.get(provider_name)
-        if provider is not None and not provider.is_local:
-            problems.append(
-                ("warn", f"el agente local usa '{provider_name}', que no es un endpoint local")
-            )
 
     return problems
 

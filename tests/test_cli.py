@@ -1,6 +1,8 @@
-"""Sprint 4: la CLI de punta a punta (detect, generate, check, agents)."""
+"""Sprint 4: la CLI de punta a puntos (detect, generate, check, agents)."""
 
 import json
+
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -196,6 +198,100 @@ def test_generate_endpoint_alias_uses_readable_provider(tmp_path, monkeypatch):
     local = (project / ".opencode" / "agents" / "local.md").read_text()
     assert "lemonade/modelo-ejemplo" in local
     assert "192" not in local  # el slug del host no debe aparecer
+
+
+def _write(path: Path, text: str) -> None:
+    """Escribe texto en un fichero de agente ya generado (helper de los tests de check)."""
+    path.write_text(text, encoding="utf-8")
+
+
+def test_check_flags_local_agent_using_cloud_model(tmp_path):
+    """FASE C: el agente 'local' exige un endpoint local. Si apunta a un modelo
+    cloud, `check` lo marca como ERROR (romperia la privacidad)."""
+    project = _project(tmp_path)
+    gen = runner.invoke(app, ["generate", "--dir", str(project), "--no-probe", "--force"])
+    assert gen.exit_code == 0, gen.output
+
+    local_path = project / ".opencode" / "agents" / "local.md"
+    text = local_path.read_text(encoding="utf-8")
+    text = text.replace("llamacpp/qwen3.6-35b", "openai/gpt-6-luna")  # cloud en rol local
+    _write(local_path, text)
+
+    checked = runner.invoke(app, ["check", "--dir", str(project), "--no-probe", "--json"])
+    payload = _json(checked)
+    assert payload["ok"] is False
+    assert any("privacidad" in p["message"] for p in payload["problems"])
+
+
+def test_check_warns_nonlocal_role_using_local_model(tmp_path):
+    """FASE C: un rol cloud (barato) que usa un modelo local (con alternatives cloud)
+    es un AVISO, no un error: saturaria la maquina sin necesidad."""
+    project = _project(tmp_path)
+    gen = runner.invoke(app, ["generate", "--dir", str(project), "--no-probe", "--force"])
+    assert gen.exit_code == 0, gen.output
+
+    barato_path = project / ".opencode" / "agents" / "barato.md"
+    text = barato_path.read_text(encoding="utf-8")
+    text = text.replace("openai/gpt-6-luna", "llamacpp/qwen3.6-35b")  # local en barato
+    _write(barato_path, text)
+
+    checked = runner.invoke(app, ["check", "--dir", str(project), "--no-probe", "--json"])
+    payload = _json(checked)
+    assert payload["ok"] is True  # es un aviso, no un error
+    assert any(
+        "barato" in p["message"] and "modelo local" in p["message"] for p in payload["problems"]
+    )
+
+
+def test_check_does_not_flag_local_only_orchestrator_fallback(tmp_path):
+    """FASE C: en un entorno con SOLO modelos locales, todos los roles caen a uno
+    local (fallback documentado). `check` NO debe marcarlos como rol cloud en rol
+    local, aunque existan agentes con el mismo modelo."""
+    project = _project(tmp_path)
+    # dejar el catalogo y la estrategia 100% locales
+    config = json.loads((project / "opencode.jsonc").read_text(encoding="utf-8"))
+    config["provider"].pop("openai", None)
+    _write(project / "opencode.jsonc", json.dumps(config))
+    strategy = (
+        "preset: balanced\n"
+        "add_local: true\n"
+        "local: llamacpp/qwen3.6-35b\n"
+        "barato: llamacpp/qwen3.6-35b\n"
+        "especialista: llamacpp/qwen3.6-35b\n"
+        "orchestrator: llamacpp/qwen3.6-35b\n"
+        "orchestrator_variant: none\n"
+    )
+    _write(project / ".orquestador.yaml", strategy)
+
+    gen = runner.invoke(app, ["generate", "--dir", str(project), "--no-probe", "--force"])
+    assert gen.exit_code == 0, gen.output
+
+    checked = runner.invoke(app, ["check", "--dir", str(project), "--no-probe", "--json"])
+    payload = _json(checked)
+    assert payload["ok"] is True
+    messages = " ".join(p["message"] for p in payload["problems"])
+    assert "modelo local" not in messages
+    assert "privacidad" not in messages
+
+
+def test_check_warns_orphan_agents_in_leash_mode(tmp_path):
+    """FASE C: con preset lean, los agentes que quedaron fuera del plan se marcan como
+    huecos con motivo 'preset lean' (aviso), no como error."""
+    project = _project(tmp_path)
+    gen = runner.invoke(app, ["generate", "--dir", str(project), "--no-probe", "--force"])
+    assert gen.exit_code == 0, gen.output
+
+    text = (project / ".orquestador.yaml").read_text(encoding="utf-8")
+    text = text.replace("preset: balanced", "preset: lean")  # local sigue siendo el worker
+    _write(project / ".orquestador.yaml", text)
+
+    checked = runner.invoke(app, ["check", "--dir", str(project), "--no-probe", "--json"])
+    payload = _json(checked)
+    assert payload["ok"] is True
+    messages = " ".join(p["message"] for p in payload["problems"])
+    assert "preset lean" in messages
+    assert "barato.md" in messages
+    assert "especialista.md" in messages
 
 
 def test_check_flags_unknown_model(tmp_path):
