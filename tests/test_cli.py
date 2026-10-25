@@ -167,6 +167,37 @@ def test_generate_accepts_endpoint_and_uses_probed_model(tmp_path, monkeypatch):
     assert "model: 192-168-1-20-1234/sondeo-modelo" in local
 
 
+def test_generate_endpoint_alias_uses_readable_provider(tmp_path, monkeypatch):
+    """REGRESION (fase b): un endpoint sondeado con alias legible (nombre@url)
+    produce refs limpias en vez del slug del host (127-0-0-1-13305)."""
+    from orquestador import catalog as catalog_mod
+
+    project = tmp_path
+    (project / "package.json").write_text(
+        json.dumps({"dependencies": {"next": "14"}, "scripts": {"test": "vitest run"}}),
+        encoding="utf-8",
+    )
+    (project / "src").mkdir()
+    monkeypatch.setattr(catalog_mod, "probe_models", lambda url, timeout=2.0: ["modelo-ejemplo"])
+
+    result = runner.invoke(
+        app,
+        [
+            "generate",
+            "--dir",
+            str(project),
+            "--endpoint",
+            "lemonade@http://192.168.1.5:99/v1",
+            "--force",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    local = (project / ".opencode" / "agents" / "local.md").read_text()
+    assert "lemonade/modelo-ejemplo" in local
+    assert "192" not in local  # el slug del host no debe aparecer
+
+
 def test_check_flags_unknown_model(tmp_path):
     project = _project(tmp_path, strategy=False)
     (project / ".orquestador.yaml").write_text(
@@ -216,3 +247,11 @@ def test_agents_without_generated_files_exits_1(tmp_path):
     result = runner.invoke(app, ["agents", "--dir", str(project), "--json"])
     assert result.exit_code == 1
     assert "orq init" in result.output
+
+
+def test_parse_endpoint_supports_alias_and_plain_url():
+    from orquestador.catalog import _parse_endpoint
+
+    assert _parse_endpoint("lemonade@http://127.0.0.1:9/v1") == ("lemonade", "http://127.0.0.1:9/v1")
+    assert _parse_endpoint("http://127.0.0.1:9/v1") == (None, "http://127.0.0.1:9/v1")
+    assert _parse_endpoint("  lemonade@http://127.0.0.1:9/v1 ") == ("lemonade", "http://127.0.0.1:9/v1")

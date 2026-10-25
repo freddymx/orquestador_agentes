@@ -125,7 +125,7 @@ def _load_context(project_dir: Path, probe: bool, endpoint: list[str] | None, ti
 def detect(
     directory: str = typer.Option(".", "--dir", "-d", help="Proyecto a analizar"),
     probe: bool = typer.Option(True, "--probe/--no-probe", help="Sondear endpoints locales"),
-    endpoint: list[str] = typer.Option(None, "--endpoint", "-e", help="Endpoint OpenAI-compatible extra"),
+    endpoint: list[str] = typer.Option(None, "--endpoint", "-e", help="Endpoint OpenAI-compatible extra (nombre@url) para sondear"),
     as_json: bool = typer.Option(False, "--json", help="Salida JSON para scripts"),
 ):
     """Muestra el stack del proyecto y los modelos disponibles."""
@@ -246,7 +246,7 @@ def _print_models(catalog) -> None:
 @app.command()
 def models(
     directory: str = typer.Option(".", "--dir", "-d"),
-    endpoint: list[str] = typer.Option(None, "--endpoint", "-e"),
+    endpoint: list[str] = typer.Option(None, "--endpoint", "-e", help="Endpoint OpenAI-compatible extra (nombre@url) para sondear"),
     timeout: float = typer.Option(2.0, "--timeout", help="Timeout de sondeo en segundos"),
     probe: bool = typer.Option(True, "--probe/--no-probe", help="Sondear endpoints locales"),
 ):
@@ -462,7 +462,7 @@ def generate(
     orchestrator_model: str = typer.Option(None, "--orchestrator-model"),
     cheap_model: str = typer.Option(None, "--cheap-model"),
     local_model: str = typer.Option(None, "--local-model"),
-    endpoint: list[str] = typer.Option(None, "--endpoint", "-e", help="Endpoint OpenAI-compatible extra para sondear"),
+    endpoint: list[str] = typer.Option(None, "--endpoint", "-e", help="Endpoint OpenAI-compatible extra (nombre@url) para sondear"),
     preset: str = typer.Option(None, "--preset", help="balanced | lean | strict"),
     force: bool = typer.Option(False, "--force", help="Sobrescribir agentes existentes (nunca la config)"),
     backup: bool = typer.Option(False, "--backup", help="Guardar .bak antes de sobrescribir"),

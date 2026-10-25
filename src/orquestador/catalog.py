@@ -544,11 +544,13 @@ def build_catalog(
 
     probed: dict[str, list[str]] = {}
     excluded: list[ModelInfo] = []
-    targets = list(extra_endpoints or [])
+    targets: list[tuple[str | None, str]] = [
+        _parse_endpoint(spec) for spec in (extra_endpoints or [])
+    ]
     for provider in providers.values():
         if provider.base_url:
-            targets.append(provider.base_url)
-    for base in targets:
+            targets.append((None, provider.base_url))
+    for alias, base in targets:
         found = probe_models(base, timeout=timeout) if probe else []
         probed[base] = found
         if not found:
@@ -557,7 +559,12 @@ def build_catalog(
             (p for p in providers.values() if p.base_url and p.base_url.rstrip("/").startswith(base.rstrip("/"))),
             None,
         )
-        provider_name = owner.name if owner else _provider_name_for(base)
+        if owner is not None:
+            provider_name = owner.name
+        elif alias:
+            provider_name = _alias_for(alias)
+        else:
+            provider_name = _provider_name_for(base)
         providers.setdefault(
             provider_name,
             Provider(name=provider_name, display_name=provider_name, base_url=base),
@@ -589,7 +596,24 @@ def build_catalog(
     return Catalog(providers=providers, models=kept, probed=probed, excluded=excluded)
 
 
+def _alias_for(name: str) -> str:
+    """Normaliza un alias de proveedor a una clave valida: minusculas, [a-z0-9-]."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "local"
+
+
+def _parse_endpoint(spec: str) -> tuple[str | None, str]:
+    """'nombre@http://host/v1' -> ('nombre', 'http://host/v1').
+
+    Permite dar un alias legible a un endpoint sondeado: en vez de un slug feo
+    del host (127-0-0-1-13305) se puede escribir --endpoint lemonade:http://...
+    """
+    if "@" in spec:
+        name, _, url = spec.partition("@")
+        return (name.strip() or None, url.strip())
+    return (None, spec.strip())
+
+
 def _provider_name_for(base_url: str) -> str:
     host = re.sub(r"^https?://", "", base_url).split("/")[0].lower()
-    slug = re.sub(r"[^a-z0-9]+", "-", host).strip("-")
-    return slug or "local"
+    return _alias_for(host)
