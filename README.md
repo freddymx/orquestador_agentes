@@ -360,6 +360,17 @@ Y para descubrir modelos sin tocar la config:
 orq models --endpoint http://localhost:8080/v1
 ```
 
+El proveedor toma el nombre del endpoint cuando solo se sondea (por ejemplo
+`127-0-0-1-8080/Modelo`). Para que la referencia sea legible, dale un alias con
+`nombre@url`:
+
+```bash
+orq models --endpoint lemonade@http://192.168.1.20:13305/v1   # -> lemonade/Modelo
+```
+
+El mismo alias se aplica en `generate` y `detect`. Si el endpoint ya esta declarado en
+`opencode.jsonc`, ese provider gana al alias (no se ignora tu config).
+
 ## Tests
 
 ```bash
