@@ -351,3 +351,32 @@ def test_parse_endpoint_supports_alias_and_plain_url():
     assert _parse_endpoint("lemonade@http://127.0.0.1:9/v1") == ("lemonade", "http://127.0.0.1:9/v1")
     assert _parse_endpoint("http://127.0.0.1:9/v1") == (None, "http://127.0.0.1:9/v1")
     assert _parse_endpoint("  lemonade@http://127.0.0.1:9/v1 ") == ("lemonade", "http://127.0.0.1:9/v1")
+
+
+def test_generate_local_provider_note_has_no_duplicate_key(tmp_path, monkeypatch):
+    """FASE E: la nota que sugiere el bloque de provider en opencode.jsonc debe ser un
+    bloque pegable de una sola clave. Anteriormente salia `lemonade: "lemonade": {`
+    (clave duplicada), que rompiera el config al pegar."""
+    project = tmp_path
+    (project / "package.json").write_text(
+        json.dumps({"dependencies": {"next": "14"}, "scripts": {"test": "vitest run"}}),
+        encoding="utf-8",
+    )
+    (project / "src").mkdir()
+    monkeypatch.setattr(catalog_mod, "probe_models", lambda url, timeout=2.0: ["modelo-prueba"])
+
+    gen = runner.invoke(
+        app,
+        [
+            "generate",
+            "--dir",
+            str(project),
+            "--endpoint",
+            "lemonade@http://127.0.0.1:99/v1",
+            "--force",
+        ],
+    )
+    assert gen.exit_code == 0, gen.output
+    assert '"lemonade": {' in gen.output  # bloque de provider pegable, una sola clave
+    assert 'lemonade: "lemonade"' not in gen.output  # clave duplicada, formato roto
+    assert "modelo-prueba" in gen.output

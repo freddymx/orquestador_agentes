@@ -1,6 +1,6 @@
 [project]
 name = "orquestador"
-version = "0.1.0"
+version = "0.1.1"
 description = "Genera un orquestador de agentes para OpenCode V2 adaptado a un proyecto y a los modelos disponibles"
 readme = "README.md"
 license = "MIT"

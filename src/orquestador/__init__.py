@@ -1,4 +1,4 @@
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .catalog import build_catalog, merge_configs
 from .cli import app

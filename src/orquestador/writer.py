@@ -368,7 +368,7 @@ def write_plan(
     for patch in plan.provider_patches:
         notes.append(
             "Proveedor local detectado sin modelos declarados. Anade este bloque a tu opencode.jsonc:\n"
-            f"  {patch['provider']}: {provider_snippet(patch)}"
+            f"  {provider_snippet(patch)}"
         )
 
     return WriteResult(files=written, skipped=skipped, strategy_path=strategy_path, notes=notes)

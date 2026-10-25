@@ -4,6 +4,14 @@ Todos los cambios relevantes de `orq` se documentan aquí. Este archivo sigue el
 [Keep a Changelog](https://keepachangelog.com/es/1.1.0/) y el proyecto se rige por
 [Semantic Versioning](https://semver.org/spec/v2.0.0/es.html).
 
+## [0.1.1] - 2026-10-25
+
+### Corregido
+- En la nota que sugiere anadir un proveedor local recién sondeado a `opencode.jsonc`, se
+  eliminaba el prefijo del modelo (`lemonade: ...`) que se duplicaba como clave dentro del
+  bloque pegable (`lemonade: "lemonade": {`, formato roto que rompila el JSON al pegar). La
+  nota ahora apunta al objeto `providers` y sugiere el bloque ya indento y con una sola clave.
+
 ## [0.1.0] - 2026-10-25
 
 Primera publicación de `orq`: un orquestador de agentes para OpenCode V2 que adapta un
