@@ -128,6 +128,45 @@ def test_generate_check_and_agents_roundtrip(tmp_path):
     assert "Eres el orquestador" in shown.output
 
 
+def test_generate_accepts_endpoint_and_uses_probed_model(tmp_path, monkeypatch):
+    """REGRESION: `generate` no aceptaba --endpoint, asi que un modelo que solo
+    sirve desde un endpoint sondeado (y no declarado en opencode.jsonc) no podia
+    entrar en el plan. Ahora se sondea y se usa."""
+    from orquestador import catalog as catalog_mod
+
+    project = tmp_path
+    (project / "package.json").write_text(
+        json.dumps(
+            {"dependencies": {"next": "14"}, "scripts": {"test": "vitest run"}}
+        ),
+        encoding="utf-8",
+    )
+    (project / "src").mkdir()
+    (project / "src" / "app.ts").write_text("export const app = 1\n", encoding="utf-8")
+    # sin opencode.jsonc: el catalogo entero sale del endpoint extra.
+
+    monkeypatch.setattr(catalog_mod, "probe_models", lambda url, timeout=2.0: ["sondeo-modelo"])
+
+    result = runner.invoke(
+        app,
+        [
+            "generate",
+            "--dir",
+            str(project),
+            "--endpoint",
+            "http://192.168.1.20:1234/v1",
+            "--force",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "sondeo-modelo" in result.output
+
+    local = (project / ".opencode" / "agents" / "local.md").read_text()
+    assert "sondeo-modelo" in local
+    # el modelo sondeado (192.168.x => local) quedo como modelo del agente local
+    assert "model: 192-168-1-20-1234/sondeo-modelo" in local
+
+
 def test_check_flags_unknown_model(tmp_path):
     project = _project(tmp_path, strategy=False)
     (project / ".orquestador.yaml").write_text(

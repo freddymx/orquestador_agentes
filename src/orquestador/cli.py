@@ -462,6 +462,7 @@ def generate(
     orchestrator_model: str = typer.Option(None, "--orchestrator-model"),
     cheap_model: str = typer.Option(None, "--cheap-model"),
     local_model: str = typer.Option(None, "--local-model"),
+    endpoint: list[str] = typer.Option(None, "--endpoint", "-e", help="Endpoint OpenAI-compatible extra para sondear"),
     preset: str = typer.Option(None, "--preset", help="balanced | lean | strict"),
     force: bool = typer.Option(False, "--force", help="Sobrescribir agentes existentes (nunca la config)"),
     backup: bool = typer.Option(False, "--backup", help="Guardar .bak antes de sobrescribir"),
@@ -493,7 +494,7 @@ def generate(
     if no_default_agent:
         strategy.default_agent = False
 
-    profile, catalog, _ = _load_context(project_dir, probe, None, 2.0)
+    profile, catalog, _ = _load_context(project_dir, probe, endpoint, 2.0)
     plan = build_plan(profile, catalog, strategy)
 
     if dry_run and as_json:
